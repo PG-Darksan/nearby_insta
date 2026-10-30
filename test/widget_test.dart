@@ -2,7 +2,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:nearby_insta/models/listing.dart';
 import 'package:nearby_insta/models/place.dart';
+import 'package:nearby_insta/services/instagram_finder.dart';
 import 'package:nearby_insta/services/overpass_service.dart';
+import 'package:nearby_insta/services/place_repository.dart';
 
 Map<String, dynamic> _node(int id, Map<String, String> tags) =>
     {'type': 'node', 'id': id, 'lat': 35.0, 'lon': 139.0, 'tags': tags};
@@ -93,14 +95,44 @@ void main() {
   });
 
   test('Overpass の結果から同じ施設の重複を除く', () {
-    final places = OverpassService.parse({
-      'elements': [
-        _node(1, {'amenity': 'university', 'name': 'テスト大学'}),
-        {'type': 'way', 'id': 2, 'center': {'lat': 35.0, 'lon': 139.0}, 'tags': {'amenity': 'university', 'name': 'テスト大学'}},
-        _node(3, {'amenity': 'cafe'}),
-      ],
-    });
+    final places = placesFromOsm([
+      _node(1, {'amenity': 'university', 'name': 'テスト大学'}),
+      {'type': 'way', 'id': 2, 'center': {'lat': 35.0, 'lon': 139.0}, 'tags': {'amenity': 'university', 'name': 'テスト大学'}},
+      _node(3, {'amenity': 'cafe'}),
+    ]);
     expect(places.map((p) => p.id), ['node/1']);
+  });
+
+  test('Wikidata や公式サイトで見つけた Instagram を追加するとカテゴリにも反映される', () {
+    final place = Place.fromOsm(_node(1, {'amenity': 'school', 'name': 'テスト高等学校'}))!;
+    expect(place.categories, {PlaceCategory.highSchool});
+    expect(place.isInstitution, isTrue);
+    place.addInstagrams([
+      InstagramLink.user('test_hs', InstagramSource.website),
+      InstagramLink.user('TEST_HS', InstagramSource.wikidata),
+    ]);
+    expect(place.instagrams.map((l) => l.username), ['test_hs']);
+    expect(place.categories, {PlaceCategory.highSchool, PlaceCategory.instagram});
+  });
+
+  test('公式サイトの HTML から Instagram のプロフィールだけを抜き出す', () {
+    const html = '''
+      <a href="https://www.instagram.com/test_school_official/">Instagram</a>
+      <a href="https://instagram.com/test_school_official">dup</a>
+      <a href="https://www.instagram.com/p/AbC123/">post</a>
+      <script src="//www.instagram.com/embed.js"></script>
+      <a href="https://www.instagram.com/test_club.basketball?igsh=xyz">club</a>
+    ''';
+    expect(InstagramFinder.extractInstagramLinks(html).map((l) => l.username),
+        ['test_school_official', 'test_club.basketball']);
+  });
+
+  test('検索範囲を覆うタイルを列挙する', () {
+    final tiles = PlaceRepository.tilesAround(const LatLng(35.658, 139.7016), 1000);
+    // 約 2km 四方のタイルなので、半径 1km なら 2〜3 タイル四方
+    expect(tiles.length, inInclusiveRange(4, 9));
+    expect(OverpassService.buildQuery(const Bounds(35.6, 139.6, 35.7, 139.7)),
+        contains('[bbox:35.600000,139.600000,35.700000,139.700000]'));
   });
 
   test('UserListing は JSON で往復できる', () {

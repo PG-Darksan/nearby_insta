@@ -203,6 +203,35 @@ class PlaceTile extends StatelessWidget {
   }
 }
 
+/// 詳細カード内の Instagram アカウント 1 件（見つけた場所も添える）。
+class _InstagramRow extends StatelessWidget {
+  const _InstagramRow({required this.link});
+
+  final InstagramLink link;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = Theme.of(context).textTheme;
+    return InkWell(
+      onTap: () => openExternal(link.url),
+      borderRadius: BorderRadius.circular(4),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        child: Wrap(
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: 6,
+          children: [
+            const Icon(Icons.camera_alt_outlined, size: 16, color: instagramPink),
+            Text(link.handle, style: text.bodyMedium?.copyWith(color: instagramPink, fontWeight: FontWeight.w600)),
+            Text('（${link.source.label}）',
+                style: text.bodySmall?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// 地図の下部に重ねて表示する、選択中の場所の詳細カード。
 class PlaceDetailCard extends StatelessWidget {
   const PlaceDetailCard({
@@ -248,7 +277,7 @@ class PlaceDetailCard extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(place.name, style: text.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
-                  if (ig != null) Text(ig.handle, style: text.bodyMedium?.copyWith(color: instagramPink)),
+                  for (final link in place.instagrams) _InstagramRow(link: link),
                   const SizedBox(height: 4),
                   CategoryBadges(place: place),
                   const SizedBox(height: 4),
@@ -296,6 +325,12 @@ class PlaceDetailCard extends StatelessWidget {
                           onPressed: () => openExternal(url),
                           icon: const Icon(Icons.language, size: 18),
                           label: Text(listing != null ? '詳細ページ' : 'Web サイト'),
+                        ),
+                      if (!place.isListing)
+                        TextButton.icon(
+                          onPressed: () => openExternal(place.instagramSearchUrl),
+                          icon: const Icon(Icons.manage_search, size: 18),
+                          label: const Text('Instagram で探す'),
                         ),
                       if (place.osmUrl case final url?)
                         TextButton.icon(

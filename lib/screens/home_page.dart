@@ -8,6 +8,7 @@ import '../controllers/nearby_controller.dart';
 import '../models/listing.dart';
 import '../models/place.dart';
 import '../services/location_service.dart';
+import '../services/search_history.dart';
 import '../widgets/listing_dialog.dart';
 import '../widgets/place_widgets.dart';
 import '../widgets/side_panel.dart';
@@ -28,10 +29,14 @@ class _HomePageState extends State<HomePage> {
   final _controller = NearbyController();
   final _map = MapController();
   final _list = ScrollController();
+  final _placeQuery = TextEditingController();
   bool _mapReady = false;
   LatLng? _fittedCenter;
   int? _fittedRadius;
   int _tab = 0;
+
+  /// 地図をタップして指定した、まだ検索していない地点。
+  LatLng? _pickedPoint;
 
   bool get _wide => MediaQuery.sizeOf(context).width >= _wideBreakpoint;
 
@@ -46,6 +51,7 @@ class _HomePageState extends State<HomePage> {
   void dispose() {
     _controller.dispose();
     _list.dispose();
+    _placeQuery.dispose();
     super.dispose();
   }
 
@@ -80,6 +86,16 @@ class _HomePageState extends State<HomePage> {
     ));
   }
 
+  /// 指定した地点を検索し、地図をその範囲に合わせる。
+  void _searchAt(LatLng point, {String? name, int? radius}) {
+    setState(() {
+      _pickedPoint = null;
+      if (!_wide) _tab = 0;
+    });
+    _controller.setCenter(point, name: name, radius: radius);
+    _fitToSearchArea();
+  }
+
   void _selectFromList(Place place) {
     _controller.select(place.id);
     if (!_wide) setState(() => _tab = 0);
@@ -87,6 +103,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _selectFromMap(Place place) {
+    setState(() => _pickedPoint = null);
     _controller.select(place.id);
     final index = _controller.visiblePlaces.indexWhere((p) => p.id == place.id);
     if (index >= 0 && _list.hasClients) {
@@ -97,6 +114,15 @@ class _HomePageState extends State<HomePage> {
         curve: Curves.easeOut,
       );
     }
+  }
+
+  void _onMapTap(TapPosition tap, LatLng point) {
+    // 場所を選んでいるときのタップは選択の解除だけにする
+    if (_controller.selectedId != null) {
+      _controller.select(null);
+      return;
+    }
+    setState(() => _pickedPoint = _pickedPoint == null ? point : null);
   }
 
   Future<void> _showMapMenu(TapPosition tap, LatLng point) async {
@@ -117,7 +143,7 @@ class _HomePageState extends State<HomePage> {
     );
     switch (action) {
       case _MapAction.search:
-        _controller.setCenter(point);
+        _searchAt(point);
       case _MapAction.addListing:
         await _addListing(point);
       case null:
@@ -125,7 +151,106 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  Future<void> _searchPlaceName(String query) async {
+    if (query.trim().isEmpty) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final results = await _controller.geocoding.search(query);
+    if (!mounted) return;
+    if (results.isEmpty) {
+      messenger.showSnackBar(SnackBar(content: Text('「$query」は見つかりませんでした')));
+      return;
+    }
+    final chosen = await showDialog<int>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: Text('「$query」の検索結果'),
+        children: [
+          for (final (i, r) in results.indexed)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(context, i),
+              child: ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.place_outlined),
+                title: Text(r.title),
+                subtitle: r.subtitle == null
+                    ? null
+                    : Text(r.subtitle!, maxLines: 2, overflow: TextOverflow.ellipsis),
+              ),
+            ),
+        ],
+      ),
+    );
+    if (chosen != null) _searchAt(results[chosen].position, name: results[chosen].title);
+  }
+
+  Future<void> _openPlaceSearchDialog() async {
+    final query = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('地名・住所で探す'),
+        content: TextField(
+          controller: _placeQuery,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: '例: 横浜駅、渋谷区神南1丁目'),
+          onSubmitted: (v) => Navigator.pop(context, v),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('キャンセル')),
+          FilledButton(onPressed: () => Navigator.pop(context, _placeQuery.text), child: const Text('検索')),
+        ],
+      ),
+    );
+    if (query != null) await _searchPlaceName(query);
+  }
+
+  Future<void> _showHistory(BuildContext anchor) async {
+    final history = _controller.history;
+    if (history.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('検索履歴はまだありません')));
+      return;
+    }
+    final box = anchor.findRenderObject()! as RenderBox;
+    final overlay = Overlay.of(context).context.findRenderObject()! as RenderBox;
+    final position = RelativeRect.fromRect(
+      box.localToGlobal(Offset(0, box.size.height), ancestor: overlay) & box.size,
+      Offset.zero & overlay.size,
+    );
+    final chosen = await showMenu<Object>(
+      context: context,
+      position: position,
+      items: [
+        for (final h in history)
+          PopupMenuItem(
+            value: h,
+            child: ListTile(
+              leading: const Icon(Icons.history),
+              title: Text(h.label),
+              subtitle: Text('${_radiusLabel(h.radius)} · ${_ago(h.at)}'),
+            ),
+          ),
+        const PopupMenuDivider(),
+        const PopupMenuItem(value: 'clear', child: Text('履歴を消去')),
+      ],
+    );
+    if (chosen is SearchPoint) {
+      _searchAt(chosen.position, name: chosen.label, radius: chosen.radius);
+    } else if (chosen == 'clear') {
+      _controller.clearHistory();
+    }
+  }
+
+  static String _radiusLabel(int r) => r < 1000 ? '${r}m' : '${r ~/ 1000}km';
+
+  static String _ago(DateTime at) {
+    final d = DateTime.now().difference(at);
+    if (d.inMinutes < 1) return 'たった今';
+    if (d.inHours < 1) return '${d.inMinutes}分前';
+    if (d.inDays < 1) return '${d.inHours}時間前';
+    return '${d.inDays}日前';
+  }
+
   Future<void> _addListing(LatLng position) async {
+    setState(() => _pickedPoint = null);
     final listing = await showListingDialog(context, position: position);
     if (listing != null) await _controller.saveListing(listing);
   }
@@ -175,14 +300,50 @@ class _HomePageState extends State<HomePage> {
             ),
             const SizedBox(width: 10),
             const Text('近くのスポット'),
+            if (wide) ...[
+              const SizedBox(width: 24),
+              SizedBox(
+                width: 320,
+                child: TextField(
+                  controller: _placeQuery,
+                  textInputAction: TextInputAction.search,
+                  decoration: InputDecoration(
+                    isDense: true,
+                    filled: true,
+                    hintText: '地名・住所で場所を探す',
+                    prefixIcon: const Icon(Icons.place_outlined),
+                    suffixIcon: IconButton(
+                      tooltip: '検索',
+                      icon: const Icon(Icons.search),
+                      onPressed: () => _searchPlaceName(_placeQuery.text),
+                    ),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide.none),
+                  ),
+                  onSubmitted: _searchPlaceName,
+                ),
+              ),
+            ],
           ],
         ),
         actions: [
+          if (!wide)
+            IconButton(
+              tooltip: '地名・住所で探す',
+              onPressed: _openPlaceSearchDialog,
+              icon: const Icon(Icons.search),
+            ),
+          Builder(
+            builder: (anchor) => IconButton(
+              tooltip: '検索履歴',
+              onPressed: () => _showHistory(anchor),
+              icon: const Icon(Icons.history),
+            ),
+          ),
           ListenableBuilder(
             listenable: _controller,
             builder: (context, _) => IconButton(
-              tooltip: '再検索',
-              onPressed: _controller.busy ? null : () => _controller.search(force: true),
+              tooltip: '最新のデータに更新',
+              onPressed: _controller.busy ? null : () => _controller.search(refresh: true),
               icon: const Icon(Icons.refresh),
             ),
           ),
@@ -222,7 +383,6 @@ class _HomePageState extends State<HomePage> {
 
   Widget _buildMap(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final wide = _wide;
     return ListenableBuilder(
       listenable: _controller,
       builder: (context, _) {
@@ -231,6 +391,7 @@ class _HomePageState extends State<HomePage> {
         final selected = c.selected;
         final places = c.visiblePlaces;
         final selectedVisible = selected != null && places.any((p) => p.id == selected.id);
+        final picked = _pickedPoint;
         return Stack(
           children: [
             FlutterMap(
@@ -242,7 +403,7 @@ class _HomePageState extends State<HomePage> {
                   _mapReady = true;
                   _fitToSearchArea();
                 },
-                onTap: (_, _) => c.select(null),
+                onTap: _onMapTap,
                 onSecondaryTap: _showMapMenu,
                 onLongPress: _showMapMenu,
               ),
@@ -269,6 +430,14 @@ class _HomePageState extends State<HomePage> {
                   if (center != null)
                     Marker(point: center, width: 22, height: 22, child: const _CurrentLocationDot()),
                   if (selectedVisible) _placeMarker(selected, true),
+                  if (picked != null)
+                    Marker(
+                      point: picked,
+                      width: 40,
+                      height: 40,
+                      alignment: Alignment.topCenter,
+                      child: Icon(Icons.location_on, size: 40, color: scheme.error),
+                    ),
                 ]),
                 RichAttributionWidget(
                   attributions: [
@@ -292,19 +461,35 @@ class _HomePageState extends State<HomePage> {
                     label: const Text('現在地で検索'),
                   ),
                   FilledButton.tonalIcon(
-                    onPressed: c.searching || !_mapReady ? null : () => c.setCenter(_map.camera.center),
+                    onPressed: !_mapReady ? null : () => _searchAt(_map.camera.center),
                     icon: const Icon(Icons.travel_explore, size: 18),
                     label: const Text('地図の中心で検索'),
                   ),
                   Chip(
-                    avatar: Icon(wide ? Icons.mouse_outlined : Icons.touch_app_outlined, size: 16),
-                    label: Text(wide ? '右クリックで検索・募集登録' : '長押しで検索・募集登録'),
+                    avatar: const Icon(Icons.touch_app_outlined, size: 16),
+                    label: const Text('地図をタップして地点を指定'),
                     backgroundColor: scheme.surface.withValues(alpha: 0.9),
                     visualDensity: VisualDensity.compact,
                   ),
                 ],
               ),
             ),
+            if (picked != null && selected == null)
+              Positioned(
+                left: 12,
+                right: 12,
+                bottom: 28,
+                child: Align(
+                  alignment: Alignment.bottomLeft,
+                  child: _PickedPointCard(
+                    point: picked,
+                    radiusLabel: _radiusLabel(c.radius),
+                    onSearch: () => _searchAt(picked),
+                    onAddListing: () => _addListing(picked),
+                    onClose: () => setState(() => _pickedPoint = null),
+                  ),
+                ),
+              ),
             if (selected != null)
               Positioned(
                 left: 12,
@@ -353,6 +538,65 @@ class _HomePageState extends State<HomePage> {
               selected: selected,
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 地図をタップして指定した地点で何をするか選ぶカード。
+class _PickedPointCard extends StatelessWidget {
+  const _PickedPointCard({
+    required this.point,
+    required this.radiusLabel,
+    required this.onSearch,
+    required this.onAddListing,
+    required this.onClose,
+  });
+
+  final LatLng point;
+  final String radiusLabel;
+  final VoidCallback onSearch;
+  final VoidCallback onAddListing;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      elevation: 6,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 8, 12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('指定した地点', style: Theme.of(context).textTheme.titleSmall),
+                const SizedBox(width: 8),
+                Text('${point.latitude.toStringAsFixed(5)}, ${point.longitude.toStringAsFixed(5)}',
+                    style: Theme.of(context).textTheme.bodySmall),
+                IconButton(onPressed: onClose, icon: const Icon(Icons.close), tooltip: '閉じる'),
+              ],
+            ),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                FilledButton.icon(
+                  onPressed: onSearch,
+                  icon: const Icon(Icons.travel_explore, size: 18),
+                  label: Text('ここから $radiusLabel を検索'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: onAddListing,
+                  icon: const Icon(Icons.add_location_alt_outlined, size: 18),
+                  label: const Text('ここに募集を登録'),
+                ),
+              ],
+            ),
+          ],
         ),
       ),
     );

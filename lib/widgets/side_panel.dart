@@ -40,12 +40,18 @@ class SidePanel extends StatelessWidget {
                   const SizedBox(width: 6),
                   Expanded(
                     child: Text(
-                      c.locating ? '現在地を取得中…' : (c.locationLabel ?? '現在地 未取得'),
+                      c.locating
+                          ? '現在地を取得中…'
+                          : c.centerName != null
+                              ? '${c.centerName} 付近'
+                              : (c.locationLabel ?? '現在地 未取得'),
                       style: text.titleSmall,
                     ),
                   ),
                 ],
               ),
+              if (!c.locating && c.centerName != null && c.locationLabel != null)
+                Text(c.locationLabel!, style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant)),
               if (c.locationNote != null)
                 Padding(
                   padding: const EdgeInsets.only(top: 4),
@@ -103,13 +109,16 @@ class SidePanel extends StatelessWidget {
           child: Row(
             children: [
               Expanded(
-                child: Text(
-                  c.searching ? (c.status ?? '検索中…') : '${places.length} 件',
-                  style: text.labelLarge,
-                  maxLines: 2,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('${places.length} 件', style: text.labelLarge),
+                    for (final s in [if (c.searching) c.status ?? '検索中…', ?c.instagramStatus])
+                      Text(s, style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant), maxLines: 2),
+                  ],
                 ),
               ),
-              if (c.busy)
+              if (c.busy || c.instagramStatus != null)
                 const Padding(
                   padding: EdgeInsets.only(right: 8),
                   child: SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
@@ -145,7 +154,7 @@ class SidePanel extends StatelessWidget {
         icon: Icons.cloud_off_outlined,
         color: scheme.error,
         text: c.error!,
-        action: TextButton(onPressed: () => c.search(force: true), child: const Text('再試行')),
+        action: TextButton(onPressed: c.search, child: const Text('再試行')),
       );
     }
     if (places.isEmpty && !c.busy) {

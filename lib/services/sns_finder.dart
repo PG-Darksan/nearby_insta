@@ -129,6 +129,11 @@ class SnsFinder {
                         SnsSource.wikidata)
                   else
                     for (final l in parseSnsTag(platform, v)) SocialLink(l.platform, l.id, SnsSource.wikidata),
+              // Instagram の場所 ID（その場所でタグ付けされた投稿のページ）
+              for (final v in values('P4173'))
+                if (int.tryParse(v) != null)
+                  SocialLink(SnsPlatform.instagram, 'https://www.instagram.com/explore/locations/$v/',
+                      SnsSource.wikidata),
             ]),
             website: values('P856').firstOrNull,
           );

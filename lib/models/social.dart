@@ -69,9 +69,28 @@ class SocialLink {
     };
   }
 
+  /// Instagram の場所ページ（その場所でタグ付けされた投稿の一覧）か。
+  bool get isInstagramLocation => platform == SnsPlatform.instagram && id.contains('/explore/locations/');
+
+  /// このアカウント（または場所）がタグ付け・メンションされた投稿を見る URL と、その説明。
+  /// 外から一覧を取得する手段がないので、ログインしたアプリ内ブラウザで各 SNS のページを開く。
+  ({String url, String label})? get taggedPosts {
+    if (isInstagramLocation) return (url: url, label: 'この場所でタグ付けされた投稿');
+    final name = username;
+    if (name == null) return null;
+    String q(String s) => Uri.encodeQueryComponent(s);
+    return switch (platform) {
+      SnsPlatform.instagram => (url: 'https://www.instagram.com/$name/tagged/', label: '@$name がタグ付けされた投稿'),
+      SnsPlatform.x => (url: 'https://x.com/search?q=${q('@$name -from:$name')}&f=live', label: '@$name へのメンション'),
+      SnsPlatform.threads => (url: 'https://www.threads.com/search?q=${q('@$name')}', label: '@$name へのメンション'),
+      SnsPlatform.bluesky => (url: 'https://bsky.app/search?q=${q('mentions:$name')}', label: '@$name へのメンション'),
+      _ => null,
+    };
+  }
+
   /// 画面に表示する名前（@ユーザー名など）。
   String get handle {
-    if (platform == SnsPlatform.instagram && id.contains('/explore/locations/')) return 'Instagram の場所ページ';
+    if (isInstagramLocation) return 'Instagram の場所ページ';
     if (_isUrl) return '${platform.label} ページ';
     return switch (platform) {
       SnsPlatform.youtube => id.startsWith('@') ? id : 'YouTube チャンネル',

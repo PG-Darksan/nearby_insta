@@ -34,7 +34,8 @@ class NearbyController extends ChangeNotifier {
   final SearchHistoryStore _historyStore;
 
   static const radiusOptions = [300, 1000, 3000, 5000, 10000, 20000];
-  static const _distance = Distance();
+  // 飲食店まで含めると数万件になるので、Vincenty より軽い Haversine で距離を求める
+  static const _distance = Distance(calculator: Haversine());
   static const _maxHistory = 15;
 
   LatLng? center;
@@ -77,17 +78,39 @@ class NearbyController extends ChangeNotifier {
   /// 検索範囲内の場所（カテゴリ・キーワードで絞り込む前）。近い順。
   List<Place> get placesInRange => _inRange;
 
-  List<Place> get visiblePlaces => _inRange.where((p) => isShown(p) && p.matches(filter)).toList();
+  List<Place> get visiblePlaces => _visible ??= _inRange.where((p) => isShown(p) && p.matches(filter)).toList();
+
+  // 一度の画面の構築で何度も読むので、状態が変わる（notifyListeners）までまとめて覚えておく
+  List<Place>? _visible;
+  Map<Object, int>? _counts;
+
+  @override
+  void notifyListeners() {
+    _visible = null;
+    _counts = null;
+    super.notifyListeners();
+  }
+
+  /// カテゴリ・SNS の種類ごとの件数を 1 回の走査で数える。
+  Map<Object, int> get _countMap => _counts ??= () {
+        final counts = <Object, int>{};
+        void add(Object key) => counts[key] = (counts[key] ?? 0) + 1;
+        for (final p in _inRange) {
+          p.baseCategories.forEach(add);
+          final linked = {for (final l in p.links) l.platform};
+          linked.forEach(add);
+          if (linked.any(platforms.contains)) add(PlaceCategory.sns);
+        }
+        return counts;
+      }();
 
   /// カテゴリと SNS の種類の表示設定で、地図・一覧に出すか。
   bool isShown(Place p) =>
       p.baseCategories.any(enabled.contains) || (enabled.contains(PlaceCategory.sns) && p.hasLinkOn(platforms));
 
-  int countOf(PlaceCategory category) => category == PlaceCategory.sns
-      ? _inRange.where((p) => p.hasLinkOn(platforms)).length
-      : _inRange.where((p) => p.baseCategories.contains(category)).length;
+  int countOf(PlaceCategory category) => _countMap[category] ?? 0;
 
-  int countOfPlatform(SnsPlatform platform) => _inRange.where((p) => p.hasLinkOn({platform})).length;
+  int countOfPlatform(SnsPlatform platform) => _countMap[platform] ?? 0;
 
   Place? get selected {
     for (final p in _inRange) {

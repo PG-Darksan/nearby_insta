@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """OSM の抽出データから、アプリがすぐに読み込める「近くのスポット」タイルを作る。
 
-1. OSM（Geofabrik の .osm.pbf）から、SNS アカウントのタグがある場所・高校・大学・
-   ボランティア/体験施設・Web サイトのあるお店や施設を取り出す
+1. OSM（Geofabrik の .osm.pbf）から、SNS アカウントのタグがある場所・高校・専門学校・大学・
+   通信制の学校・ボランティア/体験施設・飲食店・美容室・Web サイトのあるお店や施設を取り出す
 2. Wikidata と各施設の公式サイトに載っている SNS アカウントを探す
    （結果は --cache に保存し、次回は期限切れのものだけ確認し直す）
 3. 0.1 度ごとのタイル（JSON）と meta.json を --out に書き出す
@@ -54,13 +54,30 @@ SKIP_AMENITY = {
 # アプリが使うタグだけを残す
 KEEP_TAGS = (
     'name', 'name:ja', 'brand', 'amenity', 'shop', 'tourism', 'leisure', 'craft', 'office', 'club', 'healthcare',
-    'isced:level', 'addr:full', 'addr:province', 'addr:city', 'addr:quarter', 'addr:neighbourhood',
+    'isced:level', 'cuisine', 'addr:full', 'addr:province', 'addr:city', 'addr:quarter', 'addr:neighbourhood',
     'addr:block_number', 'addr:street', 'addr:housenumber', 'website', 'contact:website', 'wikidata',
 )
 
+# カテゴリの判定（lib/models/place.dart の classify と同じ規則）
 HIGH_SCHOOL = re.compile(r'高等学校|高校|中等教育学校|high school', re.I)
+VOCATIONAL = re.compile(r'専門学校|専修学校|職業能力開発|ポリテクセンター|ポリテクカレッジ|職業訓練')
+CORRESPONDENCE = re.compile(
+    r'通信制|通信教育|放送大学|(?<!電気)通信大学|サイバー大学|八洲学園大学|星槎大学|サポート校|^(?!.*大学).*高等学院|'
+    r'クラーク記念国際|第一学院|ルネサンス(?:大阪|豊田)?高等学校|鹿島学園|鹿島朝日|鹿島山北|ヒューマンキャンパス|'
+    r'飛鳥未来|おおぞら高|トライ式|ID学園|星槎国際|明蓬館|NHK学園|ＮＨＫ学園|精華学園高等学校|勇志国際|'
+    r'さくら国際|代々木高等学校|あずさ第一|科学技術学園|ワオ高等学校|つくば開成|わせがく|翔洋学園|'
+    r'日本ウェルネス高等学校|向陽台高等学校|望星高等学校|(?<![A-Za-z])[NSR]高(?:等学校)?(?![A-Za-z0-9])')
+NOT_SCHOOL = re.compile(r'警察学校|消防学校|研修所|特別支援|教習所|自動車学校|協会')
+# amenity=college が付いていることがある学習塾・習い事
+CRAM = re.compile(r'塾|ゼミナール|教室|個別指導|予備校|進学|学習支援|英会話|ピアノ|書道|そろばん')
+# 校舎・設備など、学校そのものではない建物
+SCHOOL_PART = re.compile(r'号館|棟|グラウンド|グランド|運動場|駐車場|駐輪場|寮|図書|体育館|AED|交番|センター前')
+EDU_AMENITY = {'school', 'college', 'university', 'training', 'prep_school', 'language_school', 'music_school'}
 VOLUNTEER = re.compile(r'ボランティア|社会福祉協議会|市民活動|NPOセンター|volunteer', re.I)
 EXPERIENCE = re.compile(r'体験|ワークショップ|workshop|陶芸', re.I)
+FOOD_AMENITY = {'restaurant', 'cafe', 'fast_food', 'bar', 'pub', 'food_court', 'ice_cream', 'biergarten'}
+FOOD_SHOP = {'bakery', 'pastry', 'confectionery'}
+BEAUTY_SHOP = {'hairdresser', 'beauty'}
 
 # 口コミ・予約サイトや地図など、お店自身のサイトではないもの
 SKIP_HOSTS = (
@@ -74,6 +91,10 @@ WIKIDATA_PROPS = {
     'P2003': 'instagram', 'P2002': 'x', 'P2013': 'facebook', 'P7085': 'tiktok', 'P11245': 'youtube',
     'P2397': 'youtube', 'P11892': 'threads', 'P12361': 'bluesky',
 }
+# Instagram の場所 ID（その場所でタグ付けされた投稿のページ）
+WIKIDATA_IG_LOCATION = 'P4173'
+# キャッシュの形式。上げると全件を取り直す（2: Instagram の場所 ID を追加）
+WIKIDATA_VERSION = 2
 
 # 同じサイト・リンクがこれ以上の地点（約 1km 四方の別々の区画）にあれば、チェーン店の本部サイトや
 # 自治体サイト共通のフッターとみなす（学校などは同じ大学のキャンパス違いがあるので緩める）
@@ -91,17 +112,40 @@ def log(*args):
     print(time.strftime('%H:%M:%S'), *args, flush=True)
 
 
-def is_institution(tags: dict, name: str) -> bool:
-    amenity = tags.get('amenity')
+def classify(tags: dict, name: str) -> set[str]:
+    """lib/models/place.dart の classify と同じ。PlaceCategory の名前の集合を返す。"""
+    amenity, shop = tags.get('amenity'), tags.get('shop')
     isced = [s.strip() for s in re.split('[;,]', tags.get('isced:level', ''))]
-    return bool(
-        (amenity == 'school' and (HIGH_SCHOOL.search(name) or '3' in isced))
-        or amenity == 'university'
-        or (amenity == 'college' and '大学' in name)
-        or VOLUNTEER.search(name)
-        or EXPERIENCE.search(name)
-        or tags.get('craft') in ('pottery', 'glassblower')
-    )
+    # 学校の施設か、施設の種類が付いていない学校名の建物
+    school_like = not NOT_SCHOOL.search(name) and (
+        amenity in EDU_AMENITY or tags.get('office') == 'educational_institution'
+        or ('building' in tags and not any(k in tags for k in ('amenity', 'shop', 'office', 'leisure', 'tourism'))
+            and not SCHOOL_PART.search(name)))
+    cats = set()
+    correspondence = school_like and CORRESPONDENCE.search(name)
+    if amenity == 'school' and (HIGH_SCHOOL.search(name) or '3' in isced):
+        cats.add('highSchool')
+    if school_like and not correspondence and not CRAM.search(name) and (
+            VOCATIONAL.search(name)
+            or (amenity == 'college' and '大学' not in name and not HIGH_SCHOOL.search(name))):
+        cats.add('vocational')
+    if amenity == 'university' or (amenity == 'college' and '大学' in name):
+        cats.add('university')
+    if correspondence:
+        cats.add('correspondence')
+    if VOLUNTEER.search(name):
+        cats.add('volunteer')
+    if EXPERIENCE.search(name) or tags.get('craft') in ('pottery', 'glassblower'):
+        cats.add('experience')
+    if amenity in FOOD_AMENITY or shop in FOOD_SHOP:
+        cats.add('restaurant')
+    if shop in BEAUTY_SHOP and 'メンズエステ' not in name:
+        cats.add('beauty')
+    return cats
+
+
+# 学校などの施設。同じ大学のキャンパス違いのように、同じサイトを共有していても公式サイトを確認する
+INSTITUTION = {'highSchool', 'vocational', 'university', 'correspondence', 'volunteer', 'experience'}
 
 
 def normalize_url(raw: str) -> str | None:
@@ -132,11 +176,12 @@ def skip_host(host: str) -> bool:
 # ---------------------------------------------------------------- 1. OSM から取り出す
 
 class Candidate:
-    __slots__ = ('type', 'id', 'tags', 'name', 'inst', 'chain', 'links', 'website', 'wikidata', 'lat', 'lon', 'refs',
-                 'members')
+    __slots__ = ('type', 'id', 'tags', 'name', 'cats', 'inst', 'chain', 'links', 'website', 'wikidata', 'lat', 'lon',
+                 'refs', 'members')
 
-    def __init__(self, otype, oid, tags, name, inst, chain, links, website, wikidata):
-        self.type, self.id, self.tags, self.name, self.inst, self.chain = otype, oid, tags, name, inst, chain
+    def __init__(self, otype, oid, tags, name, cats, chain, links, website, wikidata):
+        self.type, self.id, self.tags, self.name, self.cats, self.chain = otype, oid, tags, name, cats, chain
+        self.inst = bool(cats & INSTITUTION)
         self.links = [(p, i, 'osm') for p, i in links]
         self.website, self.wikidata = website, wikidata
         self.lat = self.lon = None
@@ -170,7 +215,7 @@ def extract(pbf: str):
         name = tags.get('name:ja') or tags.get('name') or tags.get('brand') or (links[0][1] if links else None)
         if not name:
             continue
-        inst = is_institution(tags, name)
+        cats = classify(tags, name)
         poi = any(k in tags for k in POI_KEYS) and tags.get('amenity') not in SKIP_AMENITY
         website = None
         for key in ('contact:website', 'website', 'url'):
@@ -180,9 +225,9 @@ def extract(pbf: str):
                     website = None
                 break
         wikidata = tags.get('wikidata') if re.match(r'^Q\d+$', tags.get('wikidata', '')) else None
-        if not (links or inst or (poi and (website or wikidata))):
+        if not (links or cats or (poi and (website or wikidata))):
             continue
-        cand = Candidate(OSM_TYPES[obj.type_str()], obj.id, {k: tags[k] for k in KEEP_TAGS if k in tags}, name, inst,
+        cand = Candidate(OSM_TYPES[obj.type_str()], obj.id, {k: tags[k] for k in KEEP_TAGS if k in tags}, name, cats,
                          'brand' in tags or 'brand:wikidata' in tags, links, website, wikidata)
         if obj.is_node():
             cand.lat, cand.lon = obj.location.lat, obj.location.lon
@@ -266,7 +311,7 @@ def http_get(url: str, timeout: float, max_bytes: int, accept: str = 'text/html,
 
 
 def wikidata_lookup(qids: list[str], cache: JsonCache, workers: int = 4) -> None:
-    todo = [q for q in sorted(set(qids)) if not cache.fresh(q, 30)]
+    todo = [q for q in sorted(set(qids)) if (cache.fresh(q, 30) or {}).get('v') != WIKIDATA_VERSION]
     log(f'Wikidata: {len(set(qids))} 件中 {len(todo)} 件を確認')
 
     def batch(ids):
@@ -303,7 +348,10 @@ def wikidata_lookup(qids: list[str], cache: JsonCache, workers: int = 4) -> None
                         links.append((platform, v))
                     else:
                         links.extend(sns.parse_tag(platform, v))
-            cache.put(qid, {'l': sns.dedupe(links), 'w': next(values('P856'), None)})
+            for v in values(WIKIDATA_IG_LOCATION):
+                if v.isdigit():
+                    links.append(('instagram', f'https://www.instagram.com/explore/locations/{v}/'))
+            cache.put(qid, {'v': WIKIDATA_VERSION, 'l': sns.dedupe(links), 'w': next(values('P856'), None)})
 
     with ThreadPoolExecutor(workers) as pool:
         list(pool.map(batch, [todo[i:i + 50] for i in range(0, len(todo), 50)]))
@@ -470,7 +518,7 @@ def build(cands: list[Candidate], sites: JsonCache):
             if sns.key((p, i)) not in seen:
                 seen.add(sns.key((p, i)))
                 links.append([p, i, s])
-        if not links and not c.inst:
+        if not links and not c.cats:
             continue
         # sns は空でも付ける（アプリはこれを見て、Wikidata・公式サイトの確認が済んでいると判断する）
         out.append({'type': c.type, 'id': c.id, 'lat': round(c.lat, 6), 'lon': round(c.lon, 6), 'tags': c.tags,

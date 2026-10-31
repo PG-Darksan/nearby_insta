@@ -94,7 +94,10 @@ void main() {
       })!;
       expect(place.id, 'way/42');
       expect(place.position.latitude, 35.5);
-      expect(place.categories, {PlaceCategory.sns});
+      expect(place.categories, {PlaceCategory.restaurant, PlaceCategory.sns});
+      // アカウントのあるお店は SNS のアイコンで表示する
+      expect(place.primaryCategory(PlaceCategory.values.toSet()), PlaceCategory.sns);
+      expect(place.isInstitution, isFalse);
       expect(place.kind, 'カフェ');
       expect(place.primaryLink()!.handle, '@test_cafe');
       expect(place.primaryLink({SnsPlatform.x})!.handle, '@test_x');
@@ -128,7 +131,8 @@ void main() {
       expect(Place.fromOsm(_node(2, {'amenity': 'school', 'name': 'Test Academy', 'isced:level': '2;3'}))!
           .categories, {PlaceCategory.highSchool});
       expect(Place.fromOsm(_node(3, {'amenity': 'school', 'name': 'テスト小学校'})), isNull);
-      expect(Place.fromOsm(_node(4, {'amenity': 'school', 'name': 'テスト高等専門学校'})), isNull);
+      expect(Place.fromOsm(_node(4, {'amenity': 'school', 'name': 'テスト高等専門学校'}))!.categories,
+          {PlaceCategory.vocational});
     });
 
     test('大学（短期大学を含み、専門学校は除く）', () {
@@ -136,7 +140,49 @@ void main() {
           {PlaceCategory.university});
       expect(Place.fromOsm(_node(2, {'amenity': 'college', 'name': 'テスト短期大学'}))!.categories,
           {PlaceCategory.university});
-      expect(Place.fromOsm(_node(3, {'amenity': 'college', 'name': 'テスト専門学校'})), isNull);
+      expect(Place.fromOsm(_node(3, {'amenity': 'college', 'name': 'テスト専門学校'}))!.categories,
+          {PlaceCategory.vocational});
+    });
+
+    // tool/test_sns.py の CLASSIFY_CASES と同じ例
+    test('専門学校・通信制・飲食店・美容室（tool/build_data.py と同じ判定）', () {
+      const cases = <(Map<String, String>, String, Set<String>)>[
+        ({'amenity': 'college'}, '日本電子専門学校', {'vocational'}),
+        ({'amenity': 'college'}, '日本デザイナー学院', {'vocational'}),
+        ({'amenity': 'school'}, '東京都立産業技術高等専門学校', {'vocational'}),
+        ({'amenity': 'college'}, '武蔵野短期大学', {'university'}),
+        ({'amenity': 'college'}, '千葉県警察学校', {}),
+        ({'building': 'yes'}, '日本電子専門学校 7号館', {}),
+        ({'amenity': 'kindergarten'}, '越谷保育専門学校附属幼稚園', {}),
+        ({'amenity': 'university'}, '放送大学東京多摩学習センター', {'university', 'correspondence'}),
+        ({'building': 'yes'}, '放送大学学園放送大学埼玉学習センター', {'correspondence'}),
+        ({'amenity': 'university'}, '電気通信大学', {'university'}),
+        ({'amenity': 'school'}, 'クラーク記念国際高等学校 さいたまキャンパス', {'highSchool', 'correspondence'}),
+        ({'amenity': 'school'}, 'N高等学校', {'highSchool', 'correspondence'}),
+        ({'amenity': 'college'}, 'KTCおおぞら高等学院厚木キャンパス', {'correspondence'}),
+        ({'amenity': 'college'}, 'ゼロ高等学院', {'correspondence'}),
+        ({'amenity': 'school'}, '私立早稲田大学本庄高等学院', {}),
+        ({'amenity': 'college'}, '湘南ゼミナール', {}),
+        ({'amenity': 'college'}, '君津商業高等学校', {}),
+        ({'amenity': 'school'}, '早稲田大学高等学院', {}),
+        ({'amenity': 'community_centre'}, '渋谷学習センター', {}),
+        ({'amenity': 'restaurant', 'cuisine': 'ramen'}, '麺屋はるか', {'restaurant'}),
+        ({'amenity': 'cafe'}, 'カフェ・ド・ポン', {'restaurant'}),
+        ({'shop': 'bakery'}, 'ベーカリー麦', {'restaurant'}),
+        ({'shop': 'hairdresser'}, 'HAIR SALON A', {'beauty'}),
+        ({'shop': 'beauty'}, 'ネイルサロン B', {'beauty'}),
+        ({'shop': 'beauty'}, 'メンズエステ C', {}),
+        ({'amenity': 'school', 'isced:level': '3'}, '県立第一', {'highSchool'}),
+        ({'amenity': 'social_facility'}, '市ボランティアセンター', {'volunteer'}),
+      ];
+      for (final (tags, name, expected) in cases) {
+        expect(classify(tags, name).map((c) => c.name).toSet(), expected, reason: name);
+      }
+      final ramen = Place.fromOsm(_node(1, {'amenity': 'restaurant', 'cuisine': 'ramen;japanese', 'name': '麺屋'}))!;
+      expect(ramen.kind, 'ラーメン');
+      final n = Place.fromOsm(_node(2, {'amenity': 'school', 'name': 'N高等学校'}))!;
+      expect(n.kind, '通信制高校');
+      expect(n.isInstitution, isTrue);
     });
 
     test('ボランティア・体験施設は名前で判定し、道路は除く', () {
@@ -180,6 +226,17 @@ void main() {
     expect(place.categories, {PlaceCategory.highSchool, PlaceCategory.sns});
   });
 
+  test('タグ付け・メンションされた投稿の URL', () {
+    expect(const SocialLink(SnsPlatform.instagram, 'cafe_abc').taggedPosts?.url,
+        'https://www.instagram.com/cafe_abc/tagged/');
+    expect(const SocialLink(SnsPlatform.x, 'cafe_x').taggedPosts?.url,
+        'https://x.com/search?q=%40cafe_x+-from%3Acafe_x&f=live');
+    const location = SocialLink(SnsPlatform.instagram, 'https://www.instagram.com/explore/locations/2432706/');
+    expect(location.isInstagramLocation, isTrue);
+    expect(location.taggedPosts?.url, location.url);
+    expect(const SocialLink(SnsPlatform.youtube, '@cafe').taggedPosts, isNull);
+  });
+
   test('SocialLink は保存形式で往復できる', () {
     const link = SocialLink(SnsPlatform.youtube, '@cafe-abc', SnsSource.website);
     final restored = SocialLink.fromJson(link.toJson())!;
@@ -208,6 +265,7 @@ void main() {
     final query = OverpassService.buildQuery(const Bounds(35.6, 139.6, 35.7, 139.7));
     expect(query, contains('[bbox:35.600000,139.600000,35.700000,139.700000]'));
     expect(query, contains('nwr["contact:twitter"]'));
+    expect(query, contains('nwr["shop"~"^(bakery|pastry|confectionery|hairdresser|beauty)\$"]["name"]'));
   });
 
   test('UserListing は JSON で往復できる', () {

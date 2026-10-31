@@ -86,7 +86,7 @@ class OverpassService {
     });
   }
 
-  /// 小中学校は取らず、高校は名前か isced:level で絞って転送量を減らす。
+  /// 小中学校は取らず、高校は名前か isced:level で絞って転送量を減らす（判定は classify と同じ）。
   static String buildQuery(Bounds b) {
     return '[out:json][timeout:90][bbox:${b.overpass}];'
         '('
@@ -100,6 +100,13 @@ class OverpassService {
         'nwr["name"~"ボランティア|社会福祉協議会|市民活動|NPOセンター|volunteer",i];'
         'nwr["name"~"体験|ワークショップ|workshop|陶芸",i];'
         'nwr["craft"~"^(pottery|glassblower)\$"];'
+        'nwr["name"~"専門学校|専修学校|職業能力開発|ポリテク|職業訓練|通信制|通信教育|放送大学|通信大学|サイバー大学|'
+        '八洲学園|星槎|サポート校|高等学院|クラーク記念|第一学院|ルネサンス.*高等学校|鹿島学園|鹿島朝日|鹿島山北|'
+        'ヒューマンキャンパス|飛鳥未来|おおぞら高|'
+        'ID学園|明蓬館|NHK学園|精華学園|勇志国際|さくら国際|代々木高等学校|あずさ第一|科学技術学園|ワオ高等学校|'
+        'つくば開成|わせがく|翔洋学園|ウェルネス高等学校|向陽台|望星|[NSR]高"];'
+        'nwr["amenity"~"^(restaurant|cafe|fast_food|bar|pub|food_court|ice_cream|biergarten)\$"]["name"];'
+        'nwr["shop"~"^(bakery|pastry|confectionery|hairdresser|beauty)\$"]["name"];'
         ');'
         'out tags center;';
   }

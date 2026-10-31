@@ -1,4 +1,4 @@
-"""tool/sns.py の確認（test/widget_test.dart の SNS の確認と同じ内容）。  python tool/test_sns.py"""
+"""tool/sns.py と build_data.classify の確認（test/widget_test.dart と同じ内容）。  python tool/test_sns.py"""
 
 import sys
 from pathlib import Path
@@ -60,4 +60,39 @@ check(sns.from_html(HTML), [
     ('tiktok', 'cafe.abc'),
 ])
 
-print('sns.py: all checks passed')
+# カテゴリの判定（test/widget_test.dart の classify と同じ例）
+import build_data  # noqa: E402
+
+CLASSIFY_CASES = [
+    ({'amenity': 'college'}, '日本電子専門学校', {'vocational'}),
+    ({'amenity': 'college'}, '日本デザイナー学院', {'vocational'}),
+    ({'amenity': 'school'}, '東京都立産業技術高等専門学校', {'vocational'}),
+    ({'amenity': 'college'}, '武蔵野短期大学', {'university'}),
+    ({'amenity': 'college'}, '千葉県警察学校', set()),
+    ({'building': 'yes'}, '日本電子専門学校 7号館', set()),
+    ({'amenity': 'kindergarten'}, '越谷保育専門学校附属幼稚園', set()),
+    ({'amenity': 'university'}, '放送大学東京多摩学習センター', {'university', 'correspondence'}),
+    ({'building': 'yes'}, '放送大学学園放送大学埼玉学習センター', {'correspondence'}),
+    ({'amenity': 'university'}, '電気通信大学', {'university'}),
+    ({'amenity': 'school'}, 'クラーク記念国際高等学校 さいたまキャンパス', {'highSchool', 'correspondence'}),
+    ({'amenity': 'school'}, 'N高等学校', {'highSchool', 'correspondence'}),
+    ({'amenity': 'college'}, 'KTCおおぞら高等学院厚木キャンパス', {'correspondence'}),
+    ({'amenity': 'college'}, 'ゼロ高等学院', {'correspondence'}),
+    ({'amenity': 'school'}, '私立早稲田大学本庄高等学院', set()),
+    ({'amenity': 'college'}, '湘南ゼミナール', set()),
+    ({'amenity': 'college'}, '君津商業高等学校', set()),
+    ({'amenity': 'school'}, '早稲田大学高等学院', set()),
+    ({'amenity': 'community_centre'}, '渋谷学習センター', set()),
+    ({'amenity': 'restaurant', 'cuisine': 'ramen'}, '麺屋はるか', {'restaurant'}),
+    ({'amenity': 'cafe'}, 'カフェ・ド・ポン', {'restaurant'}),
+    ({'shop': 'bakery'}, 'ベーカリー麦', {'restaurant'}),
+    ({'shop': 'hairdresser'}, 'HAIR SALON A', {'beauty'}),
+    ({'shop': 'beauty'}, 'ネイルサロン B', {'beauty'}),
+    ({'shop': 'beauty'}, 'メンズエステ C', set()),
+    ({'amenity': 'school', 'isced:level': '3'}, '県立第一', {'highSchool'}),
+    ({'amenity': 'social_facility'}, '市ボランティアセンター', {'volunteer'}),
+]
+for tags, name, expected in CLASSIFY_CASES:
+    check((name, build_data.classify(tags, name)), (name, expected))
+
+print('sns.py, classify: all checks passed')

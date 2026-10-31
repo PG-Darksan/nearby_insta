@@ -343,6 +343,8 @@ class PlaceDetailCard extends StatelessWidget {
                           icon: const Icon(Icons.language, size: 18),
                           label: Text(listing != null ? '詳細ページ' : 'Web サイト'),
                         ),
+                      if (place.sortedLinks.any((l) => l.taggedPosts != null))
+                        TaggedPostsButton(links: place.sortedLinks, onOpenLink: onOpenLink),
                       if (!place.isListing) SnsSearchButton(query: place.name, onOpenLink: onOpenLink),
                       if (place.osmUrl case final url?)
                         TextButton.icon(
@@ -371,6 +373,50 @@ class PlaceDetailCard extends StatelessWidget {
             IconButton(onPressed: onClose, icon: const Icon(Icons.close), tooltip: '閉じる'),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// アカウントがタグ付け・メンションされた投稿や、Instagram の場所ページを開くボタン（複数あればメニュー）。
+class TaggedPostsButton extends StatelessWidget {
+  const TaggedPostsButton({super.key, required this.links, required this.onOpenLink});
+
+  final List<SocialLink> links;
+  final OpenLink onOpenLink;
+
+  static const _label = 'タグ付けされた投稿';
+  static const _icon = Icon(Icons.photo_library_outlined, size: 18);
+
+  @override
+  Widget build(BuildContext context) {
+    final items = [
+      for (final l in links)
+        if (l.taggedPosts case final t?) (link: l, url: t.url, label: t.label),
+    ];
+    if (items.length == 1) {
+      return OutlinedButton.icon(
+        onPressed: () => onOpenLink(items.first.url),
+        icon: _icon,
+        label: const Text(_label),
+      );
+    }
+    return MenuAnchor(
+      menuChildren: [
+        for (final item in items)
+          MenuItemButton(
+            leadingIcon: SizedBox(
+              width: 20,
+              child: Center(child: FaIcon(item.link.platform.icon, size: 16, color: item.link.platform.color)),
+            ),
+            onPressed: () => onOpenLink(item.url),
+            child: Text('${item.link.platform.label}: ${item.label}'),
+          ),
+      ],
+      builder: (context, menu, _) => OutlinedButton.icon(
+        onPressed: () => menu.isOpen ? menu.close() : menu.open(),
+        icon: _icon,
+        label: const Text(_label),
       ),
     );
   }

@@ -7,18 +7,26 @@ import 'social.dart';
 export 'social.dart';
 
 /// 地図に表示する場所の種類。並び順がマーカーの色を決めるときの優先順位になる。
+/// 飲食店・美容室は SNS より後にして、アカウントのあるお店は SNS のアイコンで表示する。
 enum PlaceCategory {
-  volunteer('ボランティア', Icons.volunteer_activism_outlined, Color(0xFF2E7D32)),
-  experience('有償体験', Icons.palette_outlined, Color(0xFFEF6C00)),
-  highSchool('高校', Icons.school_outlined, Color(0xFF1E88E5)),
-  university('大学', Icons.account_balance_outlined, Color(0xFF5E35B1)),
-  sns('SNS', Icons.alternate_email, Color(0xFFDD2A7B));
+  volunteer('ボランティア', Icons.volunteer_activism_outlined, Color(0xFF2E7D32), institution: true),
+  experience('有償体験', Icons.palette_outlined, Color(0xFFEF6C00), institution: true),
+  highSchool('高校', Icons.school_outlined, Color(0xFF1E88E5), institution: true),
+  vocational('専門学校', Icons.design_services_outlined, Color(0xFF00897B), institution: true),
+  university('大学', Icons.account_balance_outlined, Color(0xFF5E35B1), institution: true),
+  correspondence('通信制', Icons.cast_for_education_outlined, Color(0xFF546E7A), institution: true),
+  sns('SNS', Icons.alternate_email, Color(0xFFDD2A7B)),
+  restaurant('飲食店', Icons.restaurant_outlined, Color(0xFFE53935)),
+  beauty('美容室', Icons.content_cut_outlined, Color(0xFF00ACC1));
 
-  const PlaceCategory(this.label, this.icon, this.color);
+  const PlaceCategory(this.label, this.icon, this.color, {this.institution = false});
 
   final String label;
   final IconData icon;
   final Color color;
+
+  /// 学校などの施設。全国データの範囲外では、アプリが公式サイトから SNS を探す。
+  final bool institution;
 }
 
 /// OSM 上の場所、またはユーザーが登録した募集情報。
@@ -70,8 +78,8 @@ class Place {
 
   String? get osmUrl => isListing ? null : 'https://www.openstreetmap.org/$id';
 
-  /// SNS 以外のカテゴリ（学校など）に当てはまるか。公式サイトを調べる対象になる。
-  bool get isInstitution => _baseCategories.isNotEmpty;
+  /// 学校などの施設か。全国データの範囲外では公式サイトを調べる対象になる。
+  bool get isInstitution => _baseCategories.any((c) => c.institution);
 
   bool hasLinkOn(Set<SnsPlatform> platforms) => links.any((l) => platforms.contains(l.platform));
 
@@ -154,31 +162,72 @@ class Place {
 }
 
 /// 要素の一覧を場所の一覧にする。建物とノードの両方に登録された同じ施設は 1 件にまとめる。
+/// タイルが届くたびに全件で呼ばれるので、同じ要素（Map）から作った場所は使い回す。
 List<Place> placesFromOsm(List<Map<String, dynamic>> elements) {
   final seen = <String>{};
   return [
     for (final el in elements)
-      if (Place.fromOsm(el) case final place?)
+      if (_placeOf(el) case final Place place)
         if (seen.add('${place.name}|${place.primaryLink()?.url ?? ''}'.toLowerCase())) place,
   ];
 }
 
+final _converted = Expando<Object>('place');
+
+/// 要素から作った場所。どのカテゴリにも当てはまらない要素は false を覚えておく。
+Object _placeOf(Map<String, dynamic> element) => _converted[element] ??= Place.fromOsm(element) ?? false;
+
+// カテゴリの判定（tool/build_data.py の classify と同じ規則）
 final _highSchoolName = RegExp(r'高等学校|高校|中等教育学校|high school', caseSensitive: false);
+final _vocationalName = RegExp(r'専門学校|専修学校|職業能力開発|ポリテクセンター|ポリテクカレッジ|職業訓練');
+final _correspondenceName = RegExp(
+    r'通信制|通信教育|放送大学|(?<!電気)通信大学|サイバー大学|八洲学園大学|星槎大学|サポート校|^(?!.*大学).*高等学院|'
+    r'クラーク記念国際|第一学院|ルネサンス(?:大阪|豊田)?高等学校|鹿島学園|鹿島朝日|鹿島山北|ヒューマンキャンパス|'
+    r'飛鳥未来|おおぞら高|トライ式|ID学園|星槎国際|明蓬館|NHK学園|ＮＨＫ学園|精華学園高等学校|勇志国際|'
+    r'さくら国際|代々木高等学校|あずさ第一|科学技術学園|ワオ高等学校|つくば開成|わせがく|翔洋学園|'
+    r'日本ウェルネス高等学校|向陽台高等学校|望星高等学校|(?<![A-Za-z])[NSR]高(?:等学校)?(?![A-Za-z0-9])');
+final _notSchool = RegExp(r'警察学校|消防学校|研修所|特別支援|教習所|自動車学校|協会');
+// amenity=college が付いていることがある学習塾・習い事
+final _cram = RegExp(r'塾|ゼミナール|教室|個別指導|予備校|進学|学習支援|英会話|ピアノ|書道|そろばん');
+// 校舎・設備など、学校そのものではない建物
+final _schoolPart = RegExp(r'号館|棟|グラウンド|グランド|運動場|駐車場|駐輪場|寮|図書|体育館|AED|交番|センター前');
+const _eduAmenities = {'school', 'college', 'university', 'training', 'prep_school', 'language_school', 'music_school'};
 final _volunteerName = RegExp(r'ボランティア|社会福祉協議会|市民活動|NPOセンター|volunteer', caseSensitive: false);
 final _experienceName = RegExp(r'体験|ワークショップ|workshop|陶芸', caseSensitive: false);
 const _experienceCrafts = {'pottery', 'glassblower'};
+const _foodAmenities = {'restaurant', 'cafe', 'fast_food', 'bar', 'pub', 'food_court', 'ice_cream', 'biergarten'};
+const _foodShops = {'bakery', 'pastry', 'confectionery'};
+const _beautyShops = {'hairdresser', 'beauty'};
 
 Set<PlaceCategory> classify(Map<String, dynamic> tags, String name) {
   final amenity = tags['amenity'];
+  final shop = tags['shop'];
   final isced = (tags['isced:level'] as String? ?? '').split(RegExp('[;,]')).map((s) => s.trim());
+  // 学校の施設か、施設の種類が付いていない学校名の建物
+  final schoolLike = (_eduAmenities.contains(amenity) ||
+          tags['office'] == 'educational_institution' ||
+          (tags.containsKey('building') &&
+              !const ['amenity', 'shop', 'office', 'leisure', 'tourism'].any(tags.containsKey) &&
+              !_schoolPart.hasMatch(name))) &&
+      !_notSchool.hasMatch(name);
+  final correspondence = schoolLike && _correspondenceName.hasMatch(name);
   return {
     if (amenity == 'school' && (_highSchoolName.hasMatch(name) || isced.contains('3')))
       PlaceCategory.highSchool,
+    if (schoolLike &&
+        !correspondence &&
+        !_cram.hasMatch(name) &&
+        (_vocationalName.hasMatch(name) ||
+            (amenity == 'college' && !name.contains('大学') && !_highSchoolName.hasMatch(name))))
+      PlaceCategory.vocational,
     if (amenity == 'university' || (amenity == 'college' && name.contains('大学')))
       PlaceCategory.university,
+    if (correspondence) PlaceCategory.correspondence,
     if (_volunteerName.hasMatch(name)) PlaceCategory.volunteer,
     if (_experienceName.hasMatch(name) || _experienceCrafts.contains(tags['craft']))
       PlaceCategory.experience,
+    if (_foodAmenities.contains(amenity) || _foodShops.contains(shop)) PlaceCategory.restaurant,
+    if (_beautyShops.contains(shop) && !name.contains('メンズエステ')) PlaceCategory.beauty,
   };
 }
 
@@ -227,10 +276,76 @@ const _kindLabels = {
   'pottery': '陶芸工房',
   'glassblower': 'ガラス工房',
   'ngo': 'NPO・NGO',
+  'pastry': 'ケーキ屋',
+  'food_court': 'フードコート',
+  'biergarten': 'ビアガーデン',
+  'training': '研修・訓練施設',
+  'prep_school': '予備校',
+  'language_school': '語学学校',
+  'music_school': '音楽教室',
+};
+
+/// 飲食店の `cuisine` の表示名。
+const _cuisineLabels = {
+  'japanese': '和食',
+  'ramen': 'ラーメン',
+  'sushi': '寿司',
+  'udon': 'うどん',
+  'soba': 'そば',
+  'noodle': '麺類',
+  'curry': 'カレー',
+  'chinese': '中華',
+  'italian': 'イタリアン',
+  'french': 'フレンチ',
+  'korean': '韓国料理',
+  'indian': 'インド料理',
+  'thai': 'タイ料理',
+  'vietnamese': 'ベトナム料理',
+  'yakiniku': '焼肉',
+  'yakitori': '焼き鳥',
+  'izakaya': '居酒屋',
+  'burger': 'ハンバーガー',
+  'pizza': 'ピザ',
+  'coffee_shop': 'カフェ',
+  'cake': 'ケーキ',
+  'donut': 'ドーナツ',
+  'crepe': 'クレープ',
+  'okonomiyaki': 'お好み焼き',
+  'takoyaki': 'たこ焼き',
+  'tonkatsu': 'とんかつ',
+  'tempura': '天ぷら',
+  'beef_bowl': '牛丼',
+  'gyudon': '牛丼',
+  'seafood': '海鮮',
+  'steak_house': 'ステーキ',
+  'western': '洋食',
+  'sandwich': 'サンドイッチ',
+  'chicken': 'チキン',
+  'fried_chicken': 'からあげ',
+  'bento': '弁当',
+  'tea': 'お茶',
+  'ice_cream': 'アイスクリーム',
+  'kebab': 'ケバブ',
+  'american': 'アメリカ料理',
+  'spanish': 'スペイン料理',
+  'regional': '郷土料理',
+  'asian': 'アジア料理',
 };
 
 String? _kindOf(Map<String, dynamic> tags, Set<PlaceCategory> categories) {
+  if (categories.contains(PlaceCategory.correspondence)) {
+    if (categories.contains(PlaceCategory.highSchool)) return '通信制高校';
+    if (categories.contains(PlaceCategory.university)) return '通信制大学';
+    return '通信制の学校';
+  }
   if (categories.contains(PlaceCategory.highSchool)) return '高等学校';
+  if (categories.contains(PlaceCategory.vocational)) {
+    return (tags['name'] as String? ?? '').contains('高等専門学校') ? '高等専門学校' : '専門学校';
+  }
+  if (categories.contains(PlaceCategory.restaurant)) {
+    final cuisine = (tags['cuisine'] as String? ?? '').split(';').first.trim();
+    if (_cuisineLabels[cuisine] case final label?) return label;
+  }
   for (final key in ['amenity', 'shop', 'tourism', 'leisure', 'craft', 'office', 'club']) {
     final value = tags[key] as String?;
     if (value != null && value != 'yes') return _kindLabels[value] ?? value.replaceAll('_', ' ');

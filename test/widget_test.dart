@@ -237,6 +237,20 @@ void main() {
     expect(place.categories, {PlaceCategory.highSchool, PlaceCategory.sns});
   });
 
+  test('チェーン店は支店名か近くの地名を付けて表示し、別の店舗はまとめない', () {
+    expect(Place.displayName('スシロー', branch: '金沢八景店'), 'スシロー 金沢八景店');
+    expect(Place.displayName('スシロー', area: '六浦'), 'スシロー（六浦）');
+    expect(Place.displayName('スシロー金沢八景店', branch: '金沢八景店'), 'スシロー金沢八景店');
+    expect(Place.displayName('六浦郵便局', area: '六浦'), '六浦郵便局');
+    final places = placesFromOsm([
+      {..._node(1, {'amenity': 'restaurant', 'name': 'スシロー'}), 'area': '六浦'},
+      {..._node(2, {'amenity': 'restaurant', 'name': 'スシロー'}), 'lat': 35.1, 'area': '六浦'},
+      {..._node(3, {'amenity': 'restaurant', 'name': 'スシロー', 'branch': '金沢八景店'}), 'lat': 35.2},
+    ]);
+    expect(places.map((p) => p.name), ['スシロー（六浦）', 'スシロー（六浦）', 'スシロー 金沢八景店']);
+    expect(places.first.searchQuery, 'スシロー 六浦');
+  });
+
   test('誰向けのお店・学校か（タグと名前で判定）', () {
     expect(audienceOf({'shop': 'hairdresser', 'female': 'yes'}, 'Salon A'), Audience.women);
     expect(audienceOf({'shop': 'hairdresser', 'male': 'yes', 'female': 'yes'}, 'Salon B'), Audience.unisex);

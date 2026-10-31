@@ -41,8 +41,8 @@ class PlaceMarker extends StatelessWidget {
     final size = selected ? 46.0 : 32.0;
     final platform = category == PlaceCategory.sns ? place.primaryLink(platforms)?.platform : null;
     final isInstagram = platform == SnsPlatform.instagram;
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 150),
+    // 地図を動かすとマーカーが入れ替わるので、色の切り替えをアニメーションさせない
+    return Container(
       width: size,
       height: size,
       alignment: Alignment.center,
@@ -264,6 +264,7 @@ class PlaceDetailCard extends StatelessWidget {
     required this.onClose,
     required this.onOpenLink,
     this.platforms,
+    this.onSearchInstagram,
     this.onEdit,
     this.onDelete,
   });
@@ -273,6 +274,9 @@ class PlaceDetailCard extends StatelessWidget {
   final VoidCallback onClose;
   final OpenLink onOpenLink;
   final Set<SnsPlatform>? platforms;
+
+  /// Instagram でアカウントを検索する（引数は検索語）。
+  final ValueChanged<String>? onSearchInstagram;
   final VoidCallback? onEdit;
   final VoidCallback? onDelete;
 
@@ -350,7 +354,12 @@ class PlaceDetailCard extends StatelessWidget {
                         ),
                       if (place.sortedLinks.any((l) => l.taggedPosts != null))
                         TaggedPostsButton(links: place.sortedLinks, onOpenLink: onOpenLink),
-                      if (!place.isListing) SnsSearchButton(query: place.name, onOpenLink: onOpenLink),
+                      if (!place.isListing && onSearchInstagram != null)
+                        TextButton.icon(
+                          onPressed: () => onSearchInstagram!(place.searchQuery),
+                          icon: FaIcon(SnsPlatform.instagram.icon, size: 16),
+                          label: const Text('Instagram で探す'),
+                        ),
                       if (place.osmUrl case final url?)
                         TextButton.icon(
                           onPressed: () => openExternal(url),
@@ -422,49 +431,6 @@ class TaggedPostsButton extends StatelessWidget {
         onPressed: () => menu.isOpen ? menu.close() : menu.open(),
         icon: _icon,
         label: const Text(_label),
-      ),
-    );
-  }
-}
-
-/// 名前で各 SNS を検索するメニュー。データにないアカウントや、その場所についての投稿を探すのに使う。
-class SnsSearchButton extends StatelessWidget {
-  const SnsSearchButton({super.key, required this.query, required this.onOpenLink, this.label = 'SNS で探す'});
-
-  final String query;
-  final OpenLink onOpenLink;
-  final String label;
-
-  static const _platforms = [
-    SnsPlatform.instagram,
-    SnsPlatform.x,
-    SnsPlatform.tiktok,
-    SnsPlatform.threads,
-    SnsPlatform.facebook,
-    SnsPlatform.youtube,
-  ];
-
-  @override
-  Widget build(BuildContext context) {
-    return MenuAnchor(
-      menuChildren: [
-        for (final p in _platforms)
-          MenuItemButton(
-            leadingIcon: SizedBox(width: 20, child: Center(child: FaIcon(p.icon, size: 16, color: p.color))),
-            onPressed: () => onOpenLink(p.searchUrl(query)),
-            child: Text('${p.label} で「$query」を検索'),
-          ),
-        MenuItemButton(
-          leadingIcon: const Icon(Icons.travel_explore, size: 20),
-          onPressed: () => openExternal('https://www.google.com/search?q=${Uri.encodeQueryComponent('"$query" '
-              '(site:instagram.com OR site:x.com OR site:facebook.com OR site:tiktok.com)')}'),
-          child: const Text('Google で SNS のアカウントを探す'),
-        ),
-      ],
-      builder: (context, menu, _) => TextButton.icon(
-        onPressed: () => menu.isOpen ? menu.close() : menu.open(),
-        icon: const Icon(Icons.manage_search, size: 18),
-        label: Text(label),
       ),
     );
   }

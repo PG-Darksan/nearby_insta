@@ -83,6 +83,16 @@ class _HomePageState extends State<HomePage> {
     setState(() => _wide ? _sideTab = 1 : _tab = 2);
   }
 
+  /// Instagram で [query] のアカウントを検索する（アプリ内ブラウザが使えなければ Google で探す）。
+  void _searchInstagram(String query) {
+    if (!SnsBrowserController.supported) {
+      openExternal('https://www.google.com/search?q=${Uri.encodeQueryComponent('site:instagram.com $query')}');
+      return;
+    }
+    _browser.searchInstagram(query);
+    setState(() => _wide ? _sideTab = 1 : _tab = 2);
+  }
+
   void _relocate() {
     _fittedCenter = null;
     _controller.locate();
@@ -308,6 +318,7 @@ class _HomePageState extends State<HomePage> {
           _addListing(_mapReady ? _map.camera.center : (_controller.center ?? const LatLng(35.681, 139.767)));
         },
         onOpenLink: _openLink,
+        onSearchInstagram: _searchInstagram,
       ),
     );
     final browser = SnsBrowser(controller: _browser);
@@ -593,6 +604,7 @@ class _HomePageState extends State<HomePage> {
                         category: selected.primaryCategory(c.enabled),
                         platforms: c.platforms,
                         onOpenLink: _openLink,
+                        onSearchInstagram: _searchInstagram,
                         onClose: () => c.select(null),
                         onEdit: selected.listing == null ? null : () => _editListing(selected.listing!),
                         onDelete: selected.listing == null ? null : () => _deleteListing(selected.listing!),
@@ -610,6 +622,8 @@ class _HomePageState extends State<HomePage> {
   Marker _placeMarker(Place place, bool selected) {
     final size = selected ? 46.0 : 32.0;
     return Marker(
+      // 地図を動かして表示するマーカーが変わっても、同じ場所には同じウィジェットを使う
+      key: ValueKey('${selected ? 'selected' : 'marker'}:${place.id}'),
       point: place.position,
       width: size,
       height: size,

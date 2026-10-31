@@ -155,14 +155,14 @@ class Place {
     final links = precomputed
         ? [for (final j in element['sns'] as List) ?SocialLink.fromJson(j)]
         : socialFromTags(tags);
-    final name = (tags['name:ja'] ?? tags['name'] ?? tags['brand'] ?? links.firstOrNull?.username) as String?;
+    final baseName = (tags['name:ja'] ?? tags['name'] ?? tags['brand'] ?? links.firstOrNull?.username) as String?;
 
-    final categories = classify(tags, name ?? '');
-    if ((categories.isEmpty && links.isEmpty) || name == null) return null;
+    final categories = classify(tags, baseName ?? '');
+    if ((categories.isEmpty && links.isEmpty) || baseName == null) return null;
 
     return Place(
       id: '${element['type']}/${element['id']}',
-      name: name,
+      name: displayName(baseName, branch: tags['branch'] as String?, area: element['area'] as String?),
       position: pos,
       categories: categories,
       links: links,
@@ -171,9 +171,20 @@ class Place {
       website: (tags['contact:website'] ?? tags['website']) as String?,
       wikidata: tags['wikidata'] as String?,
       precomputed: precomputed,
-      audience: audienceOf(tags, name),
+      audience: audienceOf(tags, baseName),
     );
   }
+
+  /// チェーン店などの名前に支店名（OSM の branch）を付ける。支店名がなければ、配信データで付けた
+  /// 近くの地名を括弧書きで付ける（例: スシロー 金沢八景店、スシロー（六浦））。
+  static String displayName(String name, {String? branch, String? area}) {
+    if (branch != null && branch.isNotEmpty && !name.contains(branch)) return '$name $branch';
+    if (area != null && area.isNotEmpty && !name.contains(area)) return '$name（$area）';
+    return name;
+  }
+
+  /// SNS で検索するときの言葉（括弧を空白にする）。
+  String get searchQuery => name.replaceAll(RegExp(r'[（）()]'), ' ').replaceAll(RegExp(r'\s+'), ' ').trim();
 
   /// Overpass の要素の座標（way / relation は中心点）。
   static LatLng? positionOf(Map<String, dynamic> element) {
@@ -184,14 +195,22 @@ class Place {
 }
 
 /// 要素の一覧を場所の一覧にする。建物とノードの両方に登録された同じ施設は 1 件にまとめる。
+/// お店などは同じ名前の別の店舗があるので、約 200m 以内のものだけを同じ施設とみなす。
 /// タイルが届くたびに全件で呼ばれるので、同じ要素（Map）から作った場所は使い回す。
 List<Place> placesFromOsm(List<Map<String, dynamic>> elements) {
   final seen = <String>{};
   return [
     for (final el in elements)
       if (_placeOf(el) case final Place place)
-        if (seen.add('${place.name}|${place.primaryLink()?.url ?? ''}'.toLowerCase())) place,
+        if (seen.add(_sameKey(place))) place,
   ];
+}
+
+String _sameKey(Place place) {
+  final key = '${place.name}|${place.primaryLink()?.url ?? ''}'.toLowerCase();
+  if (place.isInstitution) return key;
+  final p = place.position;
+  return '$key|${(p.latitude * 500).round()}|${(p.longitude * 500).round()}';
 }
 
 final _converted = Expando<Object>('place');

@@ -54,7 +54,7 @@ SKIP_AMENITY = {
 # アプリが使うタグだけを残す
 KEEP_TAGS = (
     'name', 'name:ja', 'brand', 'amenity', 'shop', 'tourism', 'leisure', 'craft', 'office', 'club', 'healthcare',
-    'isced:level', 'cuisine', 'historic', 'heritage', 'religion', 'male', 'female', 'unisex', 'hairdresser',
+    'branch', 'isced:level', 'cuisine', 'historic', 'heritage', 'religion', 'male', 'female', 'unisex', 'hairdresser',
     'clothes', 'addr:full', 'addr:province', 'addr:city', 'addr:quarter', 'addr:neighbourhood',
     'addr:block_number', 'addr:street', 'addr:housenumber', 'website', 'contact:website', 'wikidata',
 )
@@ -115,6 +115,10 @@ ADULT = {('amenity', 'brothel'), ('amenity', 'stripclub'), ('amenity', 'swingerc
          ('shop', 'erotic'), ('shop', 'adult')}
 
 OSM_TYPES = {'n': 'node', 'w': 'way', 'r': 'relation'}
+
+# チェーン店などの名前に付ける地名（OSM の地区・町のノード）。「六浦二丁目」は「六浦」にする
+AREA_PLACES = {'suburb', 'quarter', 'neighbourhood', 'locality', 'hamlet', 'village', 'town'}
+CHOME = re.compile(r'[0-9０-９一二三四五六七八九十〇]+丁目$')
 
 
 def log(*args):
@@ -213,14 +217,20 @@ class Candidate:
 def extract(pbf: str):
     cands: list[Candidate] = []
     coverage: set[str] = set()
+    areas: list[tuple[float, float, str]] = []
     fp = (osmium.FileProcessor(pbf)
           .with_filter(osmium.filter.KeyFilter('name', 'brand', *sns.ALL_TAG_KEYS))
           .with_filter(osmium.filter.KeyFilter(*POI_KEYS, *sns.ALL_TAG_KEYS, 'website', 'contact:website',
-                                               'heritage')))
+                                               'heritage', 'place')))
     seen = 0
     for obj in fp:
         seen += 1
         otags = obj.tags
+        if obj.is_node() and otags.get('place') in AREA_PLACES:
+            area = CHOME.sub('', otags.get('name:ja') or otags.get('name') or '').strip()
+            if area:
+                areas.append((obj.location.lat, obj.location.lon, area))
+            continue
         if any(k in otags for k in EXCLUDE_KEYS):
             continue
         if obj.is_node():
@@ -293,7 +303,29 @@ def extract(pbf: str):
             c.lat, c.lon = (min(lats) + max(lats)) / 2, (min(lons) + max(lons)) / 2
         c.refs = c.members = None
         out.append(c)
-    return out, coverage
+    return out, coverage, areas
+
+
+class AreaIndex:
+    """近くの地名を探すための、0.02 度（約 2km）ごとの格子。"""
+    CELL = 0.02
+
+    def __init__(self, areas: list[tuple[float, float, str]]):
+        self.cells: dict[tuple[int, int], list] = {}
+        for lat, lon, name in areas:
+            self.cells.setdefault((int(lat // self.CELL), int(lon // self.CELL)), []).append((lat, lon, name))
+
+    def nearest(self, lat: float, lon: float, max_m: float = 1500) -> str | None:
+        cy, cx = int(lat // self.CELL), int(lon // self.CELL)
+        kx = math.cos(math.radians(lat)) * 111_320
+        best, best_d = None, max_m ** 2
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                for alat, alon, name in self.cells.get((cy + dy, cx + dx), ()):
+                    d = ((alat - lat) * 110_540) ** 2 + ((alon - lon) * kx) ** 2
+                    if d < best_d:
+                        best, best_d = name, d
+        return best
 
 
 # ---------------------------------------------------------------- 2a. Wikidata
@@ -512,8 +544,12 @@ def site_urls(cands: list[Candidate]) -> set[str]:
             if c.website and (c.inst or len(cells.get(c.website, ())) < SHARED_THRESHOLD)}
 
 
-def build(cands: list[Candidate], sites: JsonCache):
+def build(cands: list[Candidate], sites: JsonCache, areas: AreaIndex):
     urls = site_urls(cands)
+    # 同じ名前の場所（チェーン店など）は、支店名（branch）がなければ近くの地名を付けて見分けられるようにする
+    name_count: dict[str, int] = {}
+    for c in cands:
+        name_count[c.name] = name_count.get(c.name, 0) + 1
     # サイト共通のフッターなど、多くの地点で見つかったリンクも店ごとのアカウントではない
     link_cells: dict[str, set] = {}
     site_links: dict[int, list] = {}
@@ -540,8 +576,12 @@ def build(cands: list[Candidate], sites: JsonCache):
         if not links and not c.cats:
             continue
         # sns は空でも付ける（アプリはこれを見て、Wikidata・公式サイトの確認が済んでいると判断する）
-        out.append({'type': c.type, 'id': c.id, 'lat': round(c.lat, 6), 'lon': round(c.lon, 6), 'tags': c.tags,
-                    'sns': links[:10]})
+        el = {'type': c.type, 'id': c.id, 'lat': round(c.lat, 6), 'lon': round(c.lon, 6), 'tags': c.tags,
+              'sns': links[:10]}
+        if 'branch' not in c.tags and '店' not in c.name and (c.chain or name_count[c.name] >= 2):
+            if area := areas.nearest(c.lat, c.lon):
+                el['area'] = area
+        out.append(el)
     return out
 
 
@@ -589,7 +629,7 @@ def main():
     wd = JsonCache(cache_dir / 'wikidata.json')
     sites = JsonCache(cache_dir / 'sites.json')
 
-    cands, coverage = extract(args.pbf)
+    cands, coverage, areas = extract(args.pbf)
     log(f'位置を確定した候補 {len(cands)} 件（SNS タグあり {sum(1 for c in cands if c.links)} 件）')
 
     wikidata_lookup([c.wikidata for c in cands if c.wikidata], wd)
@@ -602,7 +642,7 @@ def main():
         finally:
             sites.save()
 
-    elements = build(cands, sites)
+    elements = build(cands, sites, AreaIndex(areas))
     write_tiles(elements, coverage, Path(args.out), args.source)
 
 

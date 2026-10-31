@@ -42,6 +42,10 @@ class SnsBrowserController extends ChangeNotifier {
   InAppWebViewController? _web;
   String? _pending;
 
+  /// ページを読み込んだら Instagram の検索欄に入れる言葉。
+  String? _pendingSearch;
+  bool _searching = false;
+
   String? url;
   String? title;
   double progress = 1;
@@ -61,6 +65,63 @@ class SnsBrowserController extends ChangeNotifier {
     }
     notifyListeners();
   }
+
+  /// Instagram で [query] のアカウントを検索する。Web 版の Instagram には検索結果を開く URL がないので、
+  /// トップページを開いてから検索欄に入力する。ログインしていなければ、ログインした後に入力する。
+  void searchInstagram(String query) {
+    _pendingSearch = query;
+    open(homeUrl);
+  }
+
+  Future<void> _runPendingSearch() async {
+    final query = _pendingSearch;
+    final web = _web;
+    if (query == null || web == null || _searching) return;
+    final current = Uri.tryParse(url ?? '');
+    if (current == null || !current.host.endsWith('instagram.com')) {
+      _pendingSearch = null; // ほかのサイトに移ったので検索しない
+      return;
+    }
+    if (current.path.startsWith('/accounts/')) return; // ログイン画面。ログイン後に読み込み直したら検索する
+    _searching = true;
+    try {
+      final result = await web.callAsyncJavaScript(functionBody: _searchScript, arguments: {'query': query});
+      if (result?.value == true && _pendingSearch == query) _pendingSearch = null;
+    } catch (e) {
+      debugPrint('Instagram の検索欄に入力できませんでした: $e');
+    } finally {
+      _searching = false;
+    }
+  }
+
+  /// 検索欄（PC はサイドバーの「検索」、スマホは「検索とインスピレーション」の上部）を開いて [query] を入れる。
+  static const _searchScript = '''
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const findInput = () => document.querySelector(
+  'input[aria-label="検索語句"], input[aria-label="Search input"], input[placeholder="検索"], input[placeholder="Search"]');
+let clicked = false;
+for (let i = 0; i < 40; i++) {
+  const input = findInput();
+  if (input) {
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    input.focus();
+    setValue.call(input, query);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  }
+  if (!clicked) {
+    const icon = [...document.querySelectorAll('svg[aria-label]')].find((svg) =>
+      /^(検索|Search|検索とインスピレーション|Search & Explore|Explore)\$/.test(svg.getAttribute('aria-label')));
+    const button = icon && icon.closest('a, [role="button"], [role="link"]');
+    if (button) {
+      button.click();
+      clicked = true;
+    }
+  }
+  await sleep(250);
+}
+return false;
+''';
 
   void back() => _web?.goBack();
   void forward() => _web?.goForward();
@@ -256,10 +317,13 @@ class _WebView extends StatelessWidget {
       onUpdateVisitedHistory: (web, url, isReload) {
         c.url = url?.toString();
         c._updateHistory();
+        // Instagram はログイン後にページを読み込み直さずに移ることがあるので、URL が変わったときにも検索する
+        c._runPendingSearch();
       },
       onLoadStop: (web, url) {
         c.progress = 1;
         c._updateHistory();
+        c._runPendingSearch();
       },
     );
   }

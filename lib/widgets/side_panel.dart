@@ -15,6 +15,7 @@ class SidePanel extends StatelessWidget {
     required this.onSelect,
     required this.onAddListing,
     required this.onOpenLink,
+    required this.onSearchInstagram,
   });
 
   final NearbyController controller;
@@ -22,6 +23,7 @@ class SidePanel extends StatelessWidget {
   final ValueChanged<Place> onSelect;
   final VoidCallback onAddListing;
   final OpenLink onOpenLink;
+  final ValueChanged<String> onSearchInstagram;
 
   @override
   Widget build(BuildContext context) {
@@ -66,7 +68,8 @@ class SidePanel extends StatelessWidget {
                           padding: const EdgeInsets.only(top: 4),
                           child: Text(c.locationNote!, style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant)),
                         ),
-                      if (c.center != null && !c.locating) _NearbyPostsButton(controller: c, onOpenLink: onOpenLink),
+                      if (c.center != null && !c.locating) _AreaAccountsButton(
+                          controller: c, onOpenLink: onOpenLink, onSearchInstagram: onSearchInstagram),
                       const SizedBox(height: 12),
                       Text('検索範囲', style: text.labelMedium),
                       const SizedBox(height: 6),
@@ -253,49 +256,40 @@ class SidePanel extends StatelessWidget {
   };
 }
 
-/// 検索地点の付近の投稿を、各 SNS の検索で探すメニュー。
-/// 個人のアカウントは公開データに位置がないので、SNS 自身の検索（ログイン中のアカウントで）を使う。
-class _NearbyPostsButton extends StatelessWidget {
-  const _NearbyPostsButton({required this.controller, required this.onOpenLink});
+/// 検索地点の地名で、その地域のアカウントを探すボタン。Instagram のアカウント検索と、
+/// プロフィール（自己紹介）も対象になる X のユーザー検索を開く。
+/// 個人のアカウントは住んでいる場所が公開されていないので、地名を名前や自己紹介に書いているアカウントを SNS 自身の検索で探す。
+class _AreaAccountsButton extends StatelessWidget {
+  const _AreaAccountsButton({required this.controller, required this.onOpenLink, required this.onSearchInstagram});
 
   final NearbyController controller;
   final OpenLink onOpenLink;
+  final ValueChanged<String> onSearchInstagram;
 
   @override
   Widget build(BuildContext context) {
-    final c = controller;
-    final center = c.center!;
-    final km = (c.radius / 1000).clamp(0.3, 20.0);
-    final area = c.centerName?.replaceFirst(RegExp(r'[一二三四五六七八九十〇]+丁目$'), '');
-    final geocode =
-        'geocode:${center.latitude.toStringAsFixed(4)},${center.longitude.toStringAsFixed(4)},'
-        '${km < 1 ? '${(km * 1000).round()}m' : '${km.round()}km'}';
+    final area = controller.centerName?.replaceFirst(RegExp(r'[0-9０-９一二三四五六七八九十〇]+丁目$'), '');
+    if (area == null || area.isEmpty) return const SizedBox.shrink();
     return Padding(
       padding: const EdgeInsets.only(top: 6),
-      child: MenuAnchor(
-        menuChildren: [
-          MenuItemButton(
-            leadingIcon: FaIcon(SnsPlatform.x.icon, size: 16),
-            onPressed: () => onOpenLink(SnsPlatform.x.searchUrl(geocode)),
-            child: Text('X: この範囲（半径 ${km < 1 ? '${(km * 1000).round()}m' : '${km.round()}km'}）の位置情報つきの投稿'),
+      child: Row(
+        children: [
+          Expanded(
+            child: OutlinedButton.icon(
+              style: OutlinedButton.styleFrom(visualDensity: VisualDensity.compact),
+              onPressed: () => onSearchInstagram(area),
+              icon: FaIcon(SnsPlatform.instagram.icon, size: 16),
+              label: Text('「$area」のアカウントを探す'),
+            ),
           ),
-          if (area != null && area.isNotEmpty)
-            for (final p in [SnsPlatform.instagram, SnsPlatform.x, SnsPlatform.tiktok, SnsPlatform.threads])
-              MenuItemButton(
-                leadingIcon: SizedBox(
-                  width: 18,
-                  child: Center(child: FaIcon(p.icon, size: 16, color: p.color)),
-                ),
-                onPressed: () => onOpenLink(p.searchUrl(area)),
-                child: Text('${p.label}: 「$area」で検索'),
-              ),
+          const SizedBox(width: 4),
+          IconButton(
+            tooltip: 'X で「$area」をプロフィールに書いているユーザーを探す',
+            visualDensity: VisualDensity.compact,
+            icon: FaIcon(SnsPlatform.x.icon, size: 16),
+            onPressed: () => onOpenLink('https://x.com/search?q=${Uri.encodeQueryComponent(area)}&f=user'),
+          ),
         ],
-        builder: (context, menu, _) => OutlinedButton.icon(
-          style: OutlinedButton.styleFrom(visualDensity: VisualDensity.compact),
-          onPressed: () => menu.isOpen ? menu.close() : menu.open(),
-          icon: const Icon(Icons.forum_outlined, size: 18),
-          label: const Text('この付近の投稿を SNS で見る（個人のアカウントなど）'),
-        ),
       ),
     );
   }

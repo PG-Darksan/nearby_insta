@@ -106,4 +106,12 @@ CLASSIFY_CASES = [
 for tags, name, expected in CLASSIFY_CASES:
     check((name, build_data.classify(tags, name)), (name, expected))
 
-print('sns.py, classify: all checks passed')
+# チェーン店に付ける近くの地名
+areas = build_data.AreaIndex([(35.3400, 139.6200, '六浦'), (35.3500, 139.6300, '金沢八景'), (35.40, 139.70, '遠く')])
+check(areas.nearest(35.3402, 139.6203), '六浦')
+check(areas.nearest(35.3490, 139.6290), '金沢八景')
+check(areas.nearest(35.2000, 139.5000), None)
+check(build_data.CHOME.sub('', '六浦二丁目'), '六浦')
+check(build_data.CHOME.sub('', '六浦東1丁目'), '六浦東')
+
+print('sns.py, classify, area: all checks passed')

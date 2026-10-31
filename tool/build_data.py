@@ -75,8 +75,14 @@ WIKIDATA_PROPS = {
     'P2397': 'youtube', 'P11892': 'threads', 'P12361': 'bluesky',
 }
 
-# 同じリンクがこれ以上の地点（別々の場所）で見つかったら、チェーン店本部やサイト共通のフッターとみなす
-SHARED_THRESHOLD = 8
+# 同じサイト・リンクがこれ以上の地点（約 1km 四方の別々の区画）にあれば、チェーン店の本部サイトや
+# 自治体サイト共通のフッターとみなす（学校などは同じ大学のキャンパス違いがあるので緩める）
+SHARED_THRESHOLD = 6
+SHARED_THRESHOLD_INSTITUTION = 15
+
+# 成人向けの店は対象外
+ADULT = {('amenity', 'brothel'), ('amenity', 'stripclub'), ('amenity', 'swingerclub'), ('amenity', 'love_hotel'),
+         ('shop', 'erotic'), ('shop', 'adult')}
 
 OSM_TYPES = {'n': 'node', 'w': 'way', 'r': 'relation'}
 
@@ -126,10 +132,11 @@ def skip_host(host: str) -> bool:
 # ---------------------------------------------------------------- 1. OSM から取り出す
 
 class Candidate:
-    __slots__ = ('type', 'id', 'tags', 'name', 'inst', 'links', 'website', 'wikidata', 'lat', 'lon', 'refs', 'members')
+    __slots__ = ('type', 'id', 'tags', 'name', 'inst', 'chain', 'links', 'website', 'wikidata', 'lat', 'lon', 'refs',
+                 'members')
 
-    def __init__(self, otype, oid, tags, name, inst, links, website, wikidata):
-        self.type, self.id, self.tags, self.name, self.inst = otype, oid, tags, name, inst
+    def __init__(self, otype, oid, tags, name, inst, chain, links, website, wikidata):
+        self.type, self.id, self.tags, self.name, self.inst, self.chain = otype, oid, tags, name, inst, chain
         self.links = [(p, i, 'osm') for p, i in links]
         self.website, self.wikidata = website, wikidata
         self.lat = self.lon = None
@@ -157,6 +164,8 @@ def extract(pbf: str):
         elif obj.is_relation() and otags.get('type') not in ('multipolygon', 'site', 'building'):
             continue
         tags = {t.k: t.v for t in otags}
+        if any((k, tags.get(k)) in ADULT for k in ('amenity', 'shop')) or 'love_hotel' in tags:
+            continue
         links = sns.from_tags(tags)
         name = tags.get('name:ja') or tags.get('name') or tags.get('brand') or (links[0][1] if links else None)
         if not name:
@@ -173,8 +182,8 @@ def extract(pbf: str):
         wikidata = tags.get('wikidata') if re.match(r'^Q\d+$', tags.get('wikidata', '')) else None
         if not (links or inst or (poi and (website or wikidata))):
             continue
-        cand = Candidate(OSM_TYPES[obj.type_str()], obj.id, {k: tags[k] for k in KEEP_TAGS if k in tags}, name, inst, links,
-                         website, wikidata)
+        cand = Candidate(OSM_TYPES[obj.type_str()], obj.id, {k: tags[k] for k in KEEP_TAGS if k in tags}, name, inst,
+                         'brand' in tags or 'brand:wikidata' in tags, links, website, wikidata)
         if obj.is_node():
             cand.lat, cand.lon = obj.location.lat, obj.location.lon
         elif obj.is_way():
@@ -442,7 +451,10 @@ def build(cands: list[Candidate], sites: JsonCache):
     out = []
     for idx, c in enumerate(cands):
         for p, i in site_links.get(idx, ()):
-            if c.inst or len(link_cells[sns.key((p, i))]) < SHARED_THRESHOLD:
+            shared = len(link_cells[sns.key((p, i))])
+            # チェーン店（brand タグあり）の店舗ページにあるのは本部のアカウントのことが多い
+            limit = SHARED_THRESHOLD_INSTITUTION if c.inst else (2 if c.chain else SHARED_THRESHOLD)
+            if shared < limit:
                 c.links.append((p, i, 'website'))
         seen, links = set(), []
         for p, i, s in c.links:

@@ -17,7 +17,9 @@ enum PlaceCategory {
   correspondence('通信制', Icons.cast_for_education_outlined, Color(0xFF546E7A), institution: true),
   sns('SNS', Icons.alternate_email, Color(0xFFDD2A7B)),
   restaurant('飲食店', Icons.restaurant_outlined, Color(0xFFE53935)),
-  beauty('美容室', Icons.content_cut_outlined, Color(0xFF00ACC1));
+  beauty('美容室', Icons.content_cut_outlined, Color(0xFF00ACC1)),
+  historic('史跡・名所', Icons.castle_outlined, Color(0xFF8D6E63)),
+  company('本社・企業', Icons.business_outlined, Color(0xFF3949AB));
 
   const PlaceCategory(this.label, this.icon, this.color, {this.institution = false});
 
@@ -27,6 +29,21 @@ enum PlaceCategory {
 
   /// 学校などの施設。全国データの範囲外では、アプリが公式サイトから SNS を探す。
   final bool institution;
+}
+
+/// お店や学校が誰向けか。OSM の male / female / unisex などのタグと名前（メンズ・レディース・女子大学など）で
+/// 判定する。アカウントの持ち主の性別ではない。
+enum Audience {
+  women('女性向け', Icons.female, Color(0xFFD81B60)),
+  unisex('男女兼用', Icons.wc, Color(0xFF7B1FA2)),
+  men('男性向け', Icons.male, Color(0xFF1E88E5)),
+  none('指定なし', Icons.remove_circle_outline, Color(0xFF757575));
+
+  const Audience(this.label, this.icon, this.color);
+
+  final String label;
+  final IconData icon;
+  final Color color;
 }
 
 /// OSM 上の場所、またはユーザーが登録した募集情報。
@@ -43,6 +60,7 @@ class Place {
     this.wikidata,
     this.listing,
     this.precomputed = false,
+    this.audience = Audience.none,
   })  : _baseCategories = categories,
         links = links ?? [];
 
@@ -66,6 +84,9 @@ class Place {
 
   /// 配信データで Wikidata・公式サイトの確認まで済んでいるもの（アプリで調べ直さない）。
   final bool precomputed;
+
+  /// 誰向けのお店・学校か。
+  final Audience audience;
 
   double distanceMeters = 0;
 
@@ -150,6 +171,7 @@ class Place {
       website: (tags['contact:website'] ?? tags['website']) as String?,
       wikidata: tags['wikidata'] as String?,
       precomputed: precomputed,
+      audience: audienceOf(tags, name),
     );
   }
 
@@ -195,6 +217,16 @@ const _eduAmenities = {'school', 'college', 'university', 'training', 'prep_scho
 final _volunteerName = RegExp(r'ボランティア|社会福祉協議会|市民活動|NPOセンター|volunteer', caseSensitive: false);
 final _experienceName = RegExp(r'体験|ワークショップ|workshop|陶芸', caseSensitive: false);
 const _experienceCrafts = {'pottery', 'glassblower'};
+// 史跡・名所: 城跡・遺跡・古墳・歴史的建造物など（記念碑・祠・道標などは Wikidata にあるものだけ）、文化財、
+// Wikidata にある寺社・観光地
+const _historicValues = {
+  'castle', 'ruins', 'archaeological_site', 'fort', 'monument', 'manor', 'building', 'battlefield', 'city_gate', //
+  'tomb', 'heritage', 'house', 'temple', 'church', 'place_of_worship', 'shrine', 'palace', 'castle_wall',
+  'citywalls', 'aqueduct', 'bridge', 'district',
+};
+// 会社: 本社・本店の名前の事務所や建物と、支店・営業所などではない会社の事務所
+final _headOffice = RegExp(r'本社|本店');
+final _branch = RegExp(r'営業所|支店|支社|出張所|事業所|配送センター|物流センター|倉庫|工場');
 const _foodAmenities = {'restaurant', 'cafe', 'fast_food', 'bar', 'pub', 'food_court', 'ice_cream', 'biergarten'};
 const _foodShops = {'bakery', 'pastry', 'confectionery'};
 const _beautyShops = {'hairdresser', 'beauty'};
@@ -228,7 +260,36 @@ Set<PlaceCategory> classify(Map<String, dynamic> tags, String name) {
       PlaceCategory.experience,
     if (_foodAmenities.contains(amenity) || _foodShops.contains(shop)) PlaceCategory.restaurant,
     if (_beautyShops.contains(shop) && !name.contains('メンズエステ')) PlaceCategory.beauty,
+    if (_isHistoric(tags)) PlaceCategory.historic,
+    if ((tags['office'] == 'company' && !_branch.hasMatch(name)) ||
+        (_headOffice.hasMatch(name) &&
+            (tags.containsKey('office') || (tags.containsKey('building') && amenity == null && shop == null))))
+      PlaceCategory.company,
   };
+}
+
+bool _isHistoric(Map<String, dynamic> tags) {
+  final historic = tags['historic'];
+  final wikidata = tags.containsKey('wikidata');
+  return _historicValues.contains(historic) ||
+      (historic != null && wikidata) ||
+      tags.containsKey('heritage') ||
+      (wikidata && (tags['amenity'] == 'place_of_worship' || tags['tourism'] == 'attraction'));
+}
+
+final _menName = RegExp(r"(?<!wo)men'?s|(?<!ウィ)メンズ|男性専用|男性限定|バーバー|barber|理容|床屋", caseSensitive: false);
+final _womenName = RegExp(r"レディース|レディス|ladies|lady's|ウィメンズ|women'?s|女性専用|女性限定|女子", caseSensitive: false);
+
+/// 誰向けのお店・学校か（[Audience]）。
+Audience audienceOf(Map<String, dynamic> tags, String name) {
+  bool yes(String key) => tags[key] == 'yes' || tags[key] == 'only';
+  final clothes = (tags['clothes'] as String? ?? '').split(';');
+  final men = yes('male') || tags['hairdresser'] == 'barber' || clothes.contains('men') || _menName.hasMatch(name);
+  final women = yes('female') || clothes.contains('women') || _womenName.hasMatch(name);
+  if (tags['unisex'] == 'yes' || (men && women)) return Audience.unisex;
+  if (women) return Audience.women;
+  if (men) return Audience.men;
+  return Audience.none;
 }
 
 const _kindLabels = {
@@ -283,7 +344,29 @@ const _kindLabels = {
   'prep_school': '予備校',
   'language_school': '語学学校',
   'music_school': '音楽教室',
+  'company': '会社',
 };
+
+const _historicLabels = {
+  'castle': '城・城跡',
+  'ruins': '史跡',
+  'archaeological_site': '遺跡・古墳',
+  'fort': '砦・台場',
+  'monument': '記念碑',
+  'memorial': '記念碑',
+  'manor': '屋敷',
+  'building': '歴史的建造物',
+  'house': '歴史的建造物',
+  'battlefield': '古戦場',
+  'city_gate': '門',
+  'tomb': '墓所・古墳',
+  'wayside_shrine': '祠・地蔵',
+  'heritage': '文化財',
+  'castle_wall': '城壁',
+  'bridge': '歴史的な橋',
+};
+
+const _religionLabels = {'shinto': '神社', 'buddhist': '寺院', 'christian': '教会'};
 
 /// 飲食店の `cuisine` の表示名。
 const _cuisineLabels = {
@@ -345,6 +428,18 @@ String? _kindOf(Map<String, dynamic> tags, Set<PlaceCategory> categories) {
   if (categories.contains(PlaceCategory.restaurant)) {
     final cuisine = (tags['cuisine'] as String? ?? '').split(';').first.trim();
     if (_cuisineLabels[cuisine] case final label?) return label;
+  }
+  if (categories.contains(PlaceCategory.historic)) {
+    if (_historicLabels[tags['historic']] case final label?) return label;
+    if (tags['amenity'] == 'place_of_worship') return _religionLabels[tags['religion']] ?? '寺社・教会';
+    if (tags.containsKey('heritage') && !tags.containsKey('amenity') && !tags.containsKey('tourism')) return '文化財';
+  }
+  if (tags['shop'] == 'hairdresser' &&
+      (tags['hairdresser'] == 'barber' || RegExp('理容|床屋|バーバー').hasMatch(tags['name'] as String? ?? ''))) {
+    return '理容室';
+  }
+  if (categories.contains(PlaceCategory.company) && _headOffice.hasMatch(tags['name'] as String? ?? '')) {
+    return '本社';
   }
   for (final key in ['amenity', 'shop', 'tourism', 'leisure', 'craft', 'office', 'club']) {
     final value = tags[key] as String?;

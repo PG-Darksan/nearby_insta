@@ -91,6 +91,17 @@ CLASSIFY_CASES = [
     ({'shop': 'beauty'}, 'メンズエステ C', set()),
     ({'amenity': 'school', 'isced:level': '3'}, '県立第一', {'highSchool'}),
     ({'amenity': 'social_facility'}, '市ボランティアセンター', {'volunteer'}),
+    ({'historic': 'castle'}, '佐倉城', {'historic'}),
+    ({'historic': 'archaeological_site'}, '明戸古墳', {'historic'}),
+    ({'historic': 'memorial'}, '忠霊塔', set()),
+    ({'historic': 'memorial', 'wikidata': 'Q1'}, '二・二六事件慰霊像', {'historic'}),
+    ({'amenity': 'place_of_worship', 'wikidata': 'Q2'}, '浅草寺', {'historic'}),
+    ({'amenity': 'place_of_worship'}, '神明社', set()),
+    ({'heritage': '2', 'man_made': 'bridge'}, '一石橋', {'historic'}),
+    ({'office': 'company'}, '株式会社テスト', {'company'}),
+    ({'office': 'company'}, '佐川急便 千葉南営業所', set()),
+    ({'building': 'yes'}, 'ホーチキ本社', {'company'}),
+    ({'amenity': 'restaurant'}, 'ラーメン山田 本店', {'restaurant'}),
 ]
 for tags, name, expected in CLASSIFY_CASES:
     check((name, build_data.classify(tags, name)), (name, expected))

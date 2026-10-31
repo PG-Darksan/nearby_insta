@@ -105,6 +105,7 @@ class CategoryBadges extends StatelessWidget {
         if (place.isListing) const _Badge(label: '登録した募集', color: Color(0xFF616161)),
         for (final c in PlaceCategory.values)
           if (place.categories.contains(c)) _Badge(label: c.label, color: c.color),
+        if (place.audience != Audience.none) _Badge(label: place.audience.label, color: place.audience.color),
       ],
     );
   }
@@ -196,7 +197,11 @@ class PlaceTile extends StatelessWidget {
                           overflow: TextOverflow.ellipsis,
                           style: text.bodySmall?.copyWith(color: subtitleColor ?? scheme.onSurfaceVariant)),
                     Text(
-                      [?place.kind, formatDistance(place.distanceMeters)].join(' · '),
+                      [
+                        ?place.kind,
+                        if (place.audience != Audience.none) place.audience.label,
+                        formatDistance(place.distanceMeters),
+                      ].join(' · '),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant),

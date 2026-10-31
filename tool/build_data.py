@@ -2,7 +2,7 @@
 """OSM の抽出データから、アプリがすぐに読み込める「近くのスポット」タイルを作る。
 
 1. OSM（Geofabrik の .osm.pbf）から、SNS アカウントのタグがある場所・高校・専門学校・大学・
-   通信制の学校・ボランティア/体験施設・飲食店・美容室・Web サイトのあるお店や施設を取り出す
+   通信制の学校・ボランティア/体験施設・飲食店・美容室・史跡や名所・会社・Web サイトのあるお店や施設を取り出す
 2. Wikidata と各施設の公式サイトに載っている SNS アカウントを探す
    （結果は --cache に保存し、次回は期限切れのものだけ確認し直す）
 3. 0.1 度ごとのタイル（JSON）と meta.json を --out に書き出す
@@ -54,7 +54,8 @@ SKIP_AMENITY = {
 # アプリが使うタグだけを残す
 KEEP_TAGS = (
     'name', 'name:ja', 'brand', 'amenity', 'shop', 'tourism', 'leisure', 'craft', 'office', 'club', 'healthcare',
-    'isced:level', 'cuisine', 'addr:full', 'addr:province', 'addr:city', 'addr:quarter', 'addr:neighbourhood',
+    'isced:level', 'cuisine', 'historic', 'heritage', 'religion', 'male', 'female', 'unisex', 'hairdresser',
+    'clothes', 'addr:full', 'addr:province', 'addr:city', 'addr:quarter', 'addr:neighbourhood',
     'addr:block_number', 'addr:street', 'addr:housenumber', 'website', 'contact:website', 'wikidata',
 )
 
@@ -75,6 +76,14 @@ SCHOOL_PART = re.compile(r'号館|棟|グラウンド|グランド|運動場|駐
 EDU_AMENITY = {'school', 'college', 'university', 'training', 'prep_school', 'language_school', 'music_school'}
 VOLUNTEER = re.compile(r'ボランティア|社会福祉協議会|市民活動|NPOセンター|volunteer', re.I)
 EXPERIENCE = re.compile(r'体験|ワークショップ|workshop|陶芸', re.I)
+# 史跡・名所: 城跡・遺跡・古墳・歴史的建造物など（記念碑・祠・道標などは Wikidata にあるものだけ）、文化財、
+# Wikidata にある寺社・観光地
+HISTORIC = {'castle', 'ruins', 'archaeological_site', 'fort', 'monument', 'manor', 'building', 'battlefield',
+            'city_gate', 'tomb', 'heritage', 'house', 'temple', 'church', 'place_of_worship', 'shrine', 'palace',
+            'castle_wall', 'citywalls', 'aqueduct', 'bridge', 'district'}
+# 会社: 本社・本店の名前の事務所や建物と、支店・営業所などではない会社の事務所
+HEAD_OFFICE = re.compile(r'本社|本店')
+BRANCH = re.compile(r'営業所|支店|支社|出張所|事業所|配送センター|物流センター|倉庫|工場')
 FOOD_AMENITY = {'restaurant', 'cafe', 'fast_food', 'bar', 'pub', 'food_court', 'ice_cream', 'biergarten'}
 FOOD_SHOP = {'bakery', 'pastry', 'confectionery'}
 BEAUTY_SHOP = {'hairdresser', 'beauty'}
@@ -141,6 +150,15 @@ def classify(tags: dict, name: str) -> set[str]:
         cats.add('restaurant')
     if shop in BEAUTY_SHOP and 'メンズエステ' not in name:
         cats.add('beauty')
+    wikidata = 'wikidata' in tags
+    historic = tags.get('historic')
+    if (historic in HISTORIC or (historic and wikidata) or 'heritage' in tags
+            or (wikidata and (amenity == 'place_of_worship' or tags.get('tourism') == 'attraction'))):
+        cats.add('historic')
+    office = tags.get('office')
+    if (office == 'company' and not BRANCH.search(name)) or (
+            HEAD_OFFICE.search(name) and (office or ('building' in tags and not amenity and not shop))):
+        cats.add('company')
     return cats
 
 
@@ -197,7 +215,8 @@ def extract(pbf: str):
     coverage: set[str] = set()
     fp = (osmium.FileProcessor(pbf)
           .with_filter(osmium.filter.KeyFilter('name', 'brand', *sns.ALL_TAG_KEYS))
-          .with_filter(osmium.filter.KeyFilter(*POI_KEYS, *sns.ALL_TAG_KEYS, 'website', 'contact:website')))
+          .with_filter(osmium.filter.KeyFilter(*POI_KEYS, *sns.ALL_TAG_KEYS, 'website', 'contact:website',
+                                               'heritage')))
     seen = 0
     for obj in fp:
         seen += 1

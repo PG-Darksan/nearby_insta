@@ -51,6 +51,9 @@ class NearbyController extends ChangeNotifier {
 
   /// 「SNS」カテゴリで表示するサービス。
   final Set<SnsPlatform> platforms = {...SnsPlatform.values};
+
+  /// 表示する対象（女性向け・男女兼用など）。
+  final Set<Audience> audiences = {...Audience.values};
   String filter = '';
   String? selectedId;
 
@@ -96,6 +99,7 @@ class NearbyController extends ChangeNotifier {
         final counts = <Object, int>{};
         void add(Object key) => counts[key] = (counts[key] ?? 0) + 1;
         for (final p in _inRange) {
+          add(p.audience);
           p.baseCategories.forEach(add);
           final linked = {for (final l in p.links) l.platform};
           linked.forEach(add);
@@ -106,11 +110,14 @@ class NearbyController extends ChangeNotifier {
 
   /// カテゴリと SNS の種類の表示設定で、地図・一覧に出すか。
   bool isShown(Place p) =>
-      p.baseCategories.any(enabled.contains) || (enabled.contains(PlaceCategory.sns) && p.hasLinkOn(platforms));
+      audiences.contains(p.audience) &&
+      (p.baseCategories.any(enabled.contains) || (enabled.contains(PlaceCategory.sns) && p.hasLinkOn(platforms)));
 
   int countOf(PlaceCategory category) => _countMap[category] ?? 0;
 
   int countOfPlatform(SnsPlatform platform) => _countMap[platform] ?? 0;
+
+  int countOfAudience(Audience audience) => _countMap[audience] ?? 0;
 
   Place? get selected {
     for (final p in _inRange) {
@@ -286,6 +293,11 @@ class NearbyController extends ChangeNotifier {
 
   void togglePlatform(SnsPlatform platform) {
     if (!platforms.remove(platform)) platforms.add(platform);
+    notifyListeners();
+  }
+
+  void toggleAudience(Audience audience) {
+    if (!audiences.remove(audience)) audiences.add(audience);
     notifyListeners();
   }
 

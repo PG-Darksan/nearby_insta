@@ -107,6 +107,12 @@ class OverpassService {
         'つくば開成|わせがく|翔洋学園|ウェルネス高等学校|向陽台|望星|[NSR]高"];'
         'nwr["amenity"~"^(restaurant|cafe|fast_food|bar|pub|food_court|ice_cream|biergarten)\$"]["name"];'
         'nwr["shop"~"^(bakery|pastry|confectionery|hairdresser|beauty)\$"]["name"];'
+        'nwr["historic"~"^(castle|ruins|archaeological_site|fort|monument|manor|building|battlefield|city_gate|tomb|'
+        'heritage|house|temple|church|place_of_worship|shrine|palace|castle_wall|citywalls|aqueduct|bridge|district)\$"]'
+        '["name"];'
+        'nwr["historic"]["wikidata"];nwr["heritage"]["name"];'
+        'nwr["amenity"="place_of_worship"]["wikidata"];nwr["tourism"="attraction"]["wikidata"];'
+        'nwr["office"="company"]["name"];nwr["office"]["name"~"本社|本店"];nwr["building"]["name"~"本社|本店"];'
         ');'
         'out tags center;';
   }

@@ -174,6 +174,17 @@ void main() {
         ({'shop': 'beauty'}, 'メンズエステ C', {}),
         ({'amenity': 'school', 'isced:level': '3'}, '県立第一', {'highSchool'}),
         ({'amenity': 'social_facility'}, '市ボランティアセンター', {'volunteer'}),
+        ({'historic': 'castle'}, '佐倉城', {'historic'}),
+        ({'historic': 'archaeological_site'}, '明戸古墳', {'historic'}),
+        ({'historic': 'memorial'}, '忠霊塔', {}),
+        ({'historic': 'memorial', 'wikidata': 'Q1'}, '二・二六事件慰霊像', {'historic'}),
+        ({'amenity': 'place_of_worship', 'wikidata': 'Q2'}, '浅草寺', {'historic'}),
+        ({'amenity': 'place_of_worship'}, '神明社', {}),
+        ({'heritage': '2', 'man_made': 'bridge'}, '一石橋', {'historic'}),
+        ({'office': 'company'}, '株式会社テスト', {'company'}),
+        ({'office': 'company'}, '佐川急便 千葉南営業所', {}),
+        ({'building': 'yes'}, 'ホーチキ本社', {'company'}),
+        ({'amenity': 'restaurant'}, 'ラーメン山田 本店', {'restaurant'}),
       ];
       for (final (tags, name, expected) in cases) {
         expect(classify(tags, name).map((c) => c.name).toSet(), expected, reason: name);
@@ -224,6 +235,25 @@ void main() {
     ]);
     expect(_ids(place.links), ['instagram:test_hs', 'x:test_hs']);
     expect(place.categories, {PlaceCategory.highSchool, PlaceCategory.sns});
+  });
+
+  test('誰向けのお店・学校か（タグと名前で判定）', () {
+    expect(audienceOf({'shop': 'hairdresser', 'female': 'yes'}, 'Salon A'), Audience.women);
+    expect(audienceOf({'shop': 'hairdresser', 'male': 'yes', 'female': 'yes'}, 'Salon B'), Audience.unisex);
+    expect(audienceOf({'shop': 'hairdresser', 'unisex': 'yes'}, 'Salon C'), Audience.unisex);
+    expect(audienceOf({'shop': 'hairdresser', 'hairdresser': 'barber'}, 'Fit'), Audience.men);
+    expect(audienceOf({'shop': 'hairdresser'}, '理容キング'), Audience.men);
+    expect(audienceOf({'shop': 'clothes'}, "WOMEN'S SHOP"), Audience.women);
+    expect(audienceOf({'shop': 'clothes'}, "Men's Shop マルキヤ"), Audience.men);
+    expect(audienceOf({'shop': 'clothes'}, 'ウィメンズ館'), Audience.women);
+    expect(audienceOf({'amenity': 'university'}, '東京女子体育大学'), Audience.women);
+    expect(audienceOf({'amenity': 'restaurant'}, '麺屋'), Audience.none);
+    final place = Place.fromOsm(_node(1, {'shop': 'hairdresser', 'name': 'Hair Ladies'}))!;
+    expect(place.audience, Audience.women);
+    final shrine = Place.fromOsm(_node(2, {'amenity': 'place_of_worship', 'religion': 'shinto', 'wikidata': 'Q3', 'name': '烏森神社'}))!;
+    expect(shrine.categories, {PlaceCategory.historic});
+    expect(shrine.kind, '神社');
+    expect(Place.fromOsm(_node(3, {'shop': 'hairdresser', 'name': '理容 ホープ'}))!.kind, '理容室');
   });
 
   test('タグ付け・メンションされた投稿の URL', () {

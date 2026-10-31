@@ -163,7 +163,7 @@ class PlaceRepository {
 
   Future<Directory> _cacheDir() async {
     return _dir ??= await Directory(
-      // 取得する種類を変えたら名前を変えて取り直す（osm_tiles: 飲食店・美容室・専門学校の追加前）
+      // 取得する種類を変えたら名前を変えて取り直す（osm_tiles: 飲食店・美容室・専門学校・史跡・会社の追加前）
       '${(await getApplicationSupportDirectory()).path}${Platform.pathSeparator}osm_tiles2',
     ).create(recursive: true);
   }

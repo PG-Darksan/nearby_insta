@@ -410,10 +410,21 @@ def crawl(urls: list[str], cache: JsonCache, minutes: float, workers: int) -> No
 
 # ---------------------------------------------------------------- 3. まとめて書き出す
 
+def share_limit(c: Candidate) -> int:
+    # チェーン店（brand タグあり）は 2 区画にあるだけで本部のものとみなす
+    return SHARED_THRESHOLD_INSTITUTION if c.inst else (2 if c.chain else SHARED_THRESHOLD)
+
+
 def apply_wikidata(cands: list[Candidate], wd: JsonCache) -> None:
+    # 店舗の wikidata にブランドや会社の項目が入っていることが多い（ソフトバンクショップ全店に
+    # ソフトバンクの項目など）。多くの区画で同じ項目なら、その店のアカウントではない
+    cells: dict[str, set] = {}
+    for c in cands:
+        if c.wikidata:
+            cells.setdefault(c.wikidata, set()).add(c.cell())
     for c in cands:
         entry = wd.data.get(c.wikidata) if c.wikidata else None
-        if not entry:
+        if not entry or len(cells[c.wikidata]) >= share_limit(c):
             continue
         c.links += [(p, i, 'wikidata') for p, i in entry['l']]
         # OSM に Web サイトがなければ Wikidata の公式サイトを確認する
@@ -451,10 +462,8 @@ def build(cands: list[Candidate], sites: JsonCache):
     out = []
     for idx, c in enumerate(cands):
         for p, i in site_links.get(idx, ()):
-            shared = len(link_cells[sns.key((p, i))])
-            # チェーン店（brand タグあり）の店舗ページにあるのは本部のアカウントのことが多い
-            limit = SHARED_THRESHOLD_INSTITUTION if c.inst else (2 if c.chain else SHARED_THRESHOLD)
-            if shared < limit:
+            # チェーン店の店舗ページにあるのは本部のアカウントのことが多い
+            if len(link_cells[sns.key((p, i))]) < share_limit(c):
                 c.links.append((p, i, 'website'))
         seen, links = set(), []
         for p, i, s in c.links:

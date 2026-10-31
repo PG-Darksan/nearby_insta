@@ -1,0 +1,80 @@
+# 日本全国の「近くのスポット」データを作り、GitHub Pages で配信する。
+# アプリはこのデータをタイル単位で読むので、Overpass API を待たずにすぐ表示できる。
+name: Build spot data
+
+on:
+  schedule:
+    - cron: '30 18 * * 0' # 毎週月曜 3:30（日本時間）
+  workflow_dispatch:
+    inputs:
+      crawl_minutes:
+        description: 公式サイトを確認する最大時間（分）。残りは次回に確認する
+        default: '150'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: spot-data
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - run: pip install -r tool/requirements.txt
+
+      - name: Test SNS link parsing
+        run: python tool/test_sns.py
+
+      - name: Restore previous lookup results
+        # 前回までに確認した公式サイト・Wikidata の結果を配信中のサイトから取り戻す（初回はなし）
+        run: |
+          mkdir -p cache
+          for f in sites wikidata; do
+            curl -fsSL "https://pg-darksan.github.io/nearby_insta/data/cache/$f.json.gz" | gunzip > "cache/$f.json" \
+              || rm -f "cache/$f.json"
+          done
+          ls -la cache
+
+      - name: Download OpenStreetMap extract
+        run: curl -fsSL -o japan.osm.pbf https://download.geofabrik.de/asia/japan-latest.osm.pbf
+
+      - name: Build tiles
+        run: >-
+          python tool/build_data.py japan.osm.pbf
+          --out site/data/v1 --cache cache --workers 64
+          --source "OpenStreetMap (Geofabrik japan-latest)"
+          --crawl-minutes "${{ inputs.crawl_minutes || '150' }}"
+
+      - name: Assemble site
+        run: |
+          mkdir -p site/data/cache
+          gzip -9 -c cache/sites.json > site/data/cache/sites.json.gz
+          gzip -9 -c cache/wikidata.json > site/data/cache/wikidata.json.gz
+          cp tool/site/index.html site/index.html
+          touch site/.nojekyll
+          du -sh site; ls site/data/v1/t | wc -l
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

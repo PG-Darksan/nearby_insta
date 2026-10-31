@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 
 import 'screens/home_page.dart';
+import 'screens/sns_browser.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await SnsBrowserController.prepare();
   runApp(const NearbyInstaApp());
 }
 

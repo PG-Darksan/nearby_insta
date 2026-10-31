@@ -4,7 +4,7 @@ import 'package:latlong2/latlong.dart';
 import '../models/listing.dart';
 import '../models/place.dart';
 import '../services/geocoding_service.dart';
-import '../services/instagram_finder.dart';
+import '../services/sns_finder.dart';
 import '../services/listing_store.dart';
 import '../services/location_service.dart';
 import '../services/place_repository.dart';
@@ -15,20 +15,20 @@ class NearbyController extends ChangeNotifier {
   NearbyController({
     LocationService? location,
     PlaceRepository? repository,
-    InstagramFinder? finder,
+    SnsFinder? finder,
     GeocodingService? geocoding,
     ListingStore? listingStore,
     SearchHistoryStore? historyStore,
   })  : _location = location ?? LocationService(),
         _repository = repository ?? PlaceRepository(),
-        _finder = finder ?? InstagramFinder(),
+        _finder = finder ?? SnsFinder(),
         geocoding = geocoding ?? GeocodingService(),
         _listingStore = listingStore ?? ListingStore(),
         _historyStore = historyStore ?? SearchHistoryStore();
 
   final LocationService _location;
   final PlaceRepository _repository;
-  final InstagramFinder _finder;
+  final SnsFinder _finder;
   final GeocodingService geocoding;
   final ListingStore _listingStore;
   final SearchHistoryStore _historyStore;
@@ -47,6 +47,9 @@ class NearbyController extends ChangeNotifier {
   int radius = 1000;
 
   final Set<PlaceCategory> enabled = {...PlaceCategory.values};
+
+  /// 「SNS」カテゴリで表示するサービス。
+  final Set<SnsPlatform> platforms = {...SnsPlatform.values};
   String filter = '';
   String? selectedId;
 
@@ -57,8 +60,8 @@ class NearbyController extends ChangeNotifier {
   /// 取得中・再試行中などの経過メッセージ。
   String? status;
 
-  /// 公式サイトなどから Instagram を探している間の経過メッセージ。
-  String? instagramStatus;
+  /// 公式サイトなどから SNS アカウントを探している間の経過メッセージ。
+  String? snsStatus;
 
   List<UserListing> listings = [];
   List<SearchPoint> history = [];
@@ -74,11 +77,17 @@ class NearbyController extends ChangeNotifier {
   /// 検索範囲内の場所（カテゴリ・キーワードで絞り込む前）。近い順。
   List<Place> get placesInRange => _inRange;
 
-  List<Place> get visiblePlaces => _inRange
-      .where((p) => p.categories.any(enabled.contains) && p.matches(filter))
-      .toList();
+  List<Place> get visiblePlaces => _inRange.where((p) => isShown(p) && p.matches(filter)).toList();
 
-  int countOf(PlaceCategory category) => _inRange.where((p) => p.categories.contains(category)).length;
+  /// カテゴリと SNS の種類の表示設定で、地図・一覧に出すか。
+  bool isShown(Place p) =>
+      p.baseCategories.any(enabled.contains) || (enabled.contains(PlaceCategory.sns) && p.hasLinkOn(platforms));
+
+  int countOf(PlaceCategory category) => category == PlaceCategory.sns
+      ? _inRange.where((p) => p.hasLinkOn(platforms)).length
+      : _inRange.where((p) => p.baseCategories.contains(category)).length;
+
+  int countOfPlatform(SnsPlatform platform) => _inRange.where((p) => p.hasLinkOn({platform})).length;
 
   Place? get selected {
     for (final p in _inRange) {
@@ -158,7 +167,7 @@ class NearbyController extends ChangeNotifier {
     searching = true;
     error = null;
     status = null;
-    instagramStatus = null;
+    snsStatus = null;
     notifyListeners();
     var ok = false;
     try {
@@ -190,21 +199,23 @@ class NearbyController extends ChangeNotifier {
     }
     if (ok && seq == _searchSeq) {
       _remember(at);
-      await _findInstagram(seq);
+      await _findSns(seq);
     }
   }
 
   void _setElements(List<Map<String, dynamic>> elements) {
     _osmPlaces = placesFromOsm(elements);
     for (final p in _osmPlaces) {
+      if (p.precomputed) continue;
       final found = _finder.cached(p.id);
-      if (found != null) p.addInstagrams(found);
+      if (found != null) p.addLinks(found);
     }
     _recompute();
   }
 
-  /// 学校や施設の Instagram を Wikidata・公式サイトから探し、見つかったものから表示に反映する。
-  Future<void> _findInstagram(int seq) async {
+  /// 配信データの範囲外の学校や施設について、SNS アカウントを Wikidata・公式サイトから探し、
+  /// 見つかったものから表示に反映する。
+  Future<void> _findSns(int seq) async {
     final byId = {for (final p in _osmPlaces) p.id: p};
     try {
       await _finder.find(
@@ -212,18 +223,18 @@ class NearbyController extends ChangeNotifier {
         isCancelled: () => seq != _searchSeq,
         onFound: (id, links) {
           if (seq != _searchSeq) return;
-          byId[id]?.addInstagrams(links);
+          byId[id]?.addLinks(links);
           notifyListeners();
         },
         onProgress: (done, total) {
           if (seq != _searchSeq) return;
-          instagramStatus = done < total ? '学校・施設の公式サイトから Instagram を確認中… ($done/$total)' : null;
+          snsStatus = done < total ? '学校・施設の公式サイトから SNS を確認中… ($done/$total)' : null;
           notifyListeners();
         },
       );
     } finally {
-      if (seq == _searchSeq && instagramStatus != null) {
-        instagramStatus = null;
+      if (seq == _searchSeq && snsStatus != null) {
+        snsStatus = null;
         notifyListeners();
       }
     }
@@ -247,6 +258,11 @@ class NearbyController extends ChangeNotifier {
 
   void toggleCategory(PlaceCategory category) {
     if (!enabled.remove(category)) enabled.add(category);
+    notifyListeners();
+  }
+
+  void togglePlatform(SnsPlatform platform) {
+    if (!platforms.remove(platform)) platforms.add(platform);
     notifyListeners();
   }
 

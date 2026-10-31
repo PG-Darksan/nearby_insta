@@ -2,60 +2,124 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:nearby_insta/models/listing.dart';
 import 'package:nearby_insta/models/place.dart';
-import 'package:nearby_insta/services/instagram_finder.dart';
 import 'package:nearby_insta/services/overpass_service.dart';
 import 'package:nearby_insta/services/place_repository.dart';
+import 'package:nearby_insta/services/spot_data_service.dart';
 
 Map<String, dynamic> _node(int id, Map<String, String> tags) =>
     {'type': 'node', 'id': id, 'lat': 35.0, 'lon': 139.0, 'tags': tags};
 
+List<String> _ids(Iterable<SocialLink> links) => [for (final l in links) '${l.platform.name}:${l.id}'];
+
 void main() {
-  group('parseInstagram', () {
-    test('ユーザー名のみ', () {
-      final link = parseInstagram('hobgoblinshibuya')!;
-      expect(link.username, 'hobgoblinshibuya');
-      expect(link.url, 'https://www.instagram.com/hobgoblinshibuya/');
+  group('OSM タグの SNS アカウント', () {
+    test('ユーザー名・@付き・プロフィール URL', () {
+      expect(_ids(parseSnsTag(SnsPlatform.instagram, 'hobgoblinshibuya')), ['instagram:hobgoblinshibuya']);
+      expect(_ids(parseSnsTag(SnsPlatform.instagram, '@tasuichi.shibuya')), ['instagram:tasuichi.shibuya']);
+      expect(_ids(parseSnsTag(SnsPlatform.instagram, 'https://www.instagram.com/mepicabari/?hl=ja')),
+          ['instagram:mepicabari']);
+      expect(_ids(parseSnsTag(SnsPlatform.instagram, 'instagram.com/the_bellwood')), ['instagram:the_bellwood']);
     });
 
-    test('@付き', () {
-      expect(parseInstagram('@tasuichi.shibuya')!.username, 'tasuichi.shibuya');
+    test('複数値と場所ページ', () {
+      expect(
+        _ids(parseSnsTag(SnsPlatform.instagram, 'bar_trench;https://instagram.com/explore/locations/2432706/bar-trench')),
+        ['instagram:bar_trench', 'instagram:https://www.instagram.com/explore/locations/2432706/bar-trench/'],
+      );
+      final location = parseSnsUrl('https://instagram.com/explore/locations/149995422254132/takenoko')!;
+      expect(location.handle, 'Instagram の場所ページ');
+      expect(location.username, isNull);
     });
 
-    test('プロフィール URL（クエリ・末尾スラッシュ付き）', () {
-      expect(parseInstagram('https://www.instagram.com/mepicabari/?hl=ja')!.username, 'mepicabari');
-      expect(parseInstagram('instagram.com/the_bellwood')!.username, 'the_bellwood');
+    test('X・Facebook・TikTok・YouTube・LINE・Threads', () {
+      final links = socialFromTags({
+        'contact:twitter': 'https://twitter.com/#!/oldname',
+        'contact:facebook': 'https://www.facebook.com/profile.php?id=1234&ref=x',
+        'contact:tiktok': '@cafe.abc',
+        'contact:youtube': 'UCabcdefghijklmnopqrstuv',
+        'contact:line': '@shop1',
+        'contact:threads': 'cafe_abc',
+        'website': 'https://www.instagram.com/cafe_web/',
+      });
+      expect(_ids(links), [
+        'x:oldname',
+        'facebook:https://www.facebook.com/profile.php?id=1234',
+        'tiktok:cafe.abc',
+        'youtube:channel/UCabcdefghijklmnopqrstuv',
+        'line:@shop1',
+        'threads:cafe_abc',
+        'instagram:cafe_web',
+      ]);
+      expect(links.map((l) => l.url), contains('https://line.me/R/ti/p/%40shop1'));
+      expect(links.firstWhere((l) => l.platform == SnsPlatform.tiktok).url, 'https://www.tiktok.com/@cafe.abc');
     });
 
-    test('複数値ではユーザー名を優先', () {
-      final link = parseInstagram('bar_trench;https://instagram.com/explore/locations/2432706/bar-trench')!;
-      expect(link.username, 'bar_trench');
-    });
-
-    test('場所ページの URL しかない場合は URL のみ', () {
-      const url = 'https://instagram.com/explore/locations/149995422254132/takenoko';
-      final link = parseInstagram(url)!;
-      expect(link.username, isNull);
-      expect(link.url, url);
-    });
-
-    test('Instagram と無関係な値は無視', () {
-      expect(parseInstagram('https://example.com/foo'), isNull);
+    test('SNS と無関係な値や共有ボタンは無視', () {
+      expect(parseSnsTag(SnsPlatform.instagram, 'https://example.com/foo'), isEmpty);
+      expect(parseSnsUrl('https://twitter.com/share?url=x'), isNull);
+      expect(parseSnsUrl('https://graph.facebook.com/v25.0/x'), isNull);
+      expect(parseSnsUrl('https://www.youtube.com/watch?v=1'), isNull);
+      expect(parseSnsUrl('https://www.fedex.com/abc'), isNull);
     });
   });
 
+  test('公式サイトの HTML から SNS のプロフィールだけを抜き出す', () {
+    const html = r'''
+      <a href="https://www.instagram.com/test_school_official/">Instagram</a>
+      <a href="https://instagram.com/test_school_official">dup</a>
+      <a href="https://www.instagram.com/p/AbC123/">post</a>
+      <script src="//www.instagram.com/embed.js"></script>
+      <a href="https://www.instagram.com/test_club.basketball?igsh=xyz">club</a>
+      <a href="https://twitter.com/share?url=x">share</a><a href="https://x.com/cafe_abc">x</a>
+      <iframe src="https://www.facebook.com/plugins/page.php?href=https%3A%2F%2Fwww.facebook.com%2Fcafeabc.page&tabs=timeline"></iframe>
+      <a href="https://line.me/R/ti/p/%40abc123">line</a> <script>var u = "https:\/\/www.tiktok.com\/@cafe.abc";</script>
+    ''';
+    expect(_ids(socialFromHtml(html)), [
+      'instagram:test_school_official',
+      'instagram:test_club.basketball',
+      'x:cafe_abc',
+      'facebook:cafeabc.page',
+      'line:@abc123',
+      'tiktok:cafe.abc',
+    ]);
+  });
+
   group('Place.fromOsm のカテゴリ判定', () {
-    test('Instagram 付きのカフェ（way は center 座標を使う）', () {
+    test('SNS 付きのカフェ（way は center 座標を使う）', () {
       final place = Place.fromOsm({
         'type': 'way',
         'id': 42,
         'center': {'lat': 35.5, 'lon': 139.5},
-        'tags': {'name': 'テスト店', 'amenity': 'cafe', 'contact:instagram': 'test_cafe'},
+        'tags': {'name': 'テスト店', 'amenity': 'cafe', 'contact:instagram': 'test_cafe', 'contact:twitter': 'test_x'},
       })!;
       expect(place.id, 'way/42');
       expect(place.position.latitude, 35.5);
-      expect(place.categories, {PlaceCategory.instagram});
+      expect(place.categories, {PlaceCategory.sns});
       expect(place.kind, 'カフェ');
-      expect(place.instagram!.handle, '@test_cafe');
+      expect(place.primaryLink()!.handle, '@test_cafe');
+      expect(place.primaryLink({SnsPlatform.x})!.handle, '@test_x');
+      expect(place.precomputed, isFalse);
+    });
+
+    test('配信データの要素は sns をそのまま使い、確認済みとして扱う', () {
+      final place = Place.fromOsm({
+        'type': 'node',
+        'id': 1,
+        'lat': 35.0,
+        'lon': 139.0,
+        'tags': {'name': 'テスト高等学校', 'amenity': 'school'},
+        'sns': [
+          ['instagram', 'test_hs', 'website'],
+          ['x', 'test_hs_x', 'wikidata'],
+          ['unknown', 'zzz', 'osm'],
+        ],
+      })!;
+      expect(place.precomputed, isTrue);
+      expect(place.categories, {PlaceCategory.highSchool, PlaceCategory.sns});
+      expect(_ids(place.links), ['instagram:test_hs', 'x:test_hs_x']);
+      expect(place.links.first.source, SnsSource.website);
+      expect(Place.fromOsm({..._node(2, {'name': 'テスト高等学校', 'amenity': 'school'}), 'sns': []})!.precomputed,
+          isTrue);
     });
 
     test('高校は名前か isced:level で判定し、小中学校は除く', () {
@@ -88,13 +152,13 @@ void main() {
     test('複数カテゴリに当てはまる場合は表示中の優先カテゴリで色を決める', () {
       final place = Place.fromOsm(
           _node(1, {'amenity': 'university', 'name': 'テスト大学', 'contact:instagram': 'test_univ'}))!;
-      expect(place.categories, {PlaceCategory.university, PlaceCategory.instagram});
+      expect(place.categories, {PlaceCategory.university, PlaceCategory.sns});
       expect(place.primaryCategory(PlaceCategory.values.toSet()), PlaceCategory.university);
-      expect(place.primaryCategory({PlaceCategory.instagram}), PlaceCategory.instagram);
+      expect(place.primaryCategory({PlaceCategory.sns}), PlaceCategory.sns);
     });
   });
 
-  test('Overpass の結果から同じ施設の重複を除く', () {
+  test('同じ施設の重複を除く', () {
     final places = placesFromOsm([
       _node(1, {'amenity': 'university', 'name': 'テスト大学'}),
       {'type': 'way', 'id': 2, 'center': {'lat': 35.0, 'lon': 139.0}, 'tags': {'amenity': 'university', 'name': 'テスト大学'}},
@@ -103,36 +167,47 @@ void main() {
     expect(places.map((p) => p.id), ['node/1']);
   });
 
-  test('Wikidata や公式サイトで見つけた Instagram を追加するとカテゴリにも反映される', () {
+  test('アプリで見つけたアカウントを追加するとカテゴリにも反映され、重複は除く', () {
     final place = Place.fromOsm(_node(1, {'amenity': 'school', 'name': 'テスト高等学校'}))!;
     expect(place.categories, {PlaceCategory.highSchool});
     expect(place.isInstitution, isTrue);
-    place.addInstagrams([
-      InstagramLink.user('test_hs', InstagramSource.website),
-      InstagramLink.user('TEST_HS', InstagramSource.wikidata),
+    place.addLinks([
+      const SocialLink(SnsPlatform.instagram, 'test_hs', SnsSource.website),
+      const SocialLink(SnsPlatform.instagram, 'TEST_HS', SnsSource.wikidata),
+      const SocialLink(SnsPlatform.x, 'test_hs', SnsSource.website),
     ]);
-    expect(place.instagrams.map((l) => l.username), ['test_hs']);
-    expect(place.categories, {PlaceCategory.highSchool, PlaceCategory.instagram});
+    expect(_ids(place.links), ['instagram:test_hs', 'x:test_hs']);
+    expect(place.categories, {PlaceCategory.highSchool, PlaceCategory.sns});
   });
 
-  test('公式サイトの HTML から Instagram のプロフィールだけを抜き出す', () {
-    const html = '''
-      <a href="https://www.instagram.com/test_school_official/">Instagram</a>
-      <a href="https://instagram.com/test_school_official">dup</a>
-      <a href="https://www.instagram.com/p/AbC123/">post</a>
-      <script src="//www.instagram.com/embed.js"></script>
-      <a href="https://www.instagram.com/test_club.basketball?igsh=xyz">club</a>
-    ''';
-    expect(InstagramFinder.extractInstagramLinks(html).map((l) => l.username),
-        ['test_school_official', 'test_club.basketball']);
+  test('SocialLink は保存形式で往復できる', () {
+    const link = SocialLink(SnsPlatform.youtube, '@cafe-abc', SnsSource.website);
+    final restored = SocialLink.fromJson(link.toJson())!;
+    expect(restored, link);
+    expect(restored.source, SnsSource.website);
+    expect(restored.url, 'https://www.youtube.com/@cafe-abc');
   });
 
-  test('検索範囲を覆うタイルを列挙する', () {
+  test('配信データのタイルは中心に近い順に、データのあるものだけ選ぶ', () {
+    final meta = SpotMeta(
+      generated: '2026-10-31T00:00:00Z',
+      tileDeg: 0.1,
+      coverage: {'35_139'},
+      tiles: {'353_1396', '353_1395', '354_1396', '300_1300'},
+    );
+    expect(meta.covers(const LatLng(35.33, 139.62)), isTrue);
+    expect(meta.covers(const LatLng(35.10, 129.04)), isFalse); // 釜山（範囲外）
+    expect(meta.tilesAround(const LatLng(35.33, 139.62), 1000), ['353_1396']);
+    expect(meta.tilesAround(const LatLng(35.39, 139.61), 3000), ['353_1396', '353_1395', '354_1396']);
+  });
+
+  test('Overpass 用のタイルと問い合わせ', () {
     final tiles = PlaceRepository.tilesAround(const LatLng(35.658, 139.7016), 1000);
     // 約 2km 四方のタイルなので、半径 1km なら 2〜3 タイル四方
     expect(tiles.length, inInclusiveRange(4, 9));
-    expect(OverpassService.buildQuery(const Bounds(35.6, 139.6, 35.7, 139.7)),
-        contains('[bbox:35.600000,139.600000,35.700000,139.700000]'));
+    final query = OverpassService.buildQuery(const Bounds(35.6, 139.6, 35.7, 139.7));
+    expect(query, contains('[bbox:35.600000,139.600000,35.700000,139.700000]'));
+    expect(query, contains('nwr["contact:twitter"]'));
   });
 
   test('UserListing は JSON で往復できる', () {

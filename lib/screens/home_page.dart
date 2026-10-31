@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:latlong2/latlong.dart';
 
 import '../controllers/nearby_controller.dart';
@@ -12,6 +13,7 @@ import '../services/search_history.dart';
 import '../widgets/listing_dialog.dart';
 import '../widgets/place_widgets.dart';
 import '../widgets/side_panel.dart';
+import 'sns_browser.dart';
 
 enum _MapAction { search, addListing }
 
@@ -26,14 +28,20 @@ class _HomePageState extends State<HomePage> {
   /// これより狭い画面（スマホ）では地図と一覧をタブで切り替える。
   static const _wideBreakpoint = 840.0;
 
+  /// 地図に描くマーカーの上限（多すぎると地図の操作が重くなる）。一覧には全件を表示する。
+  static const _maxMarkers = 600;
+
   final _controller = NearbyController();
+  final _browser = SnsBrowserController();
   final _map = MapController();
   final _list = ScrollController();
   final _placeQuery = TextEditingController();
   bool _mapReady = false;
   LatLng? _fittedCenter;
   int? _fittedRadius;
+  /// スマホ: 0 地図 / 1 一覧 / 2 SNS。PC の右側: 0 一覧 / 1 SNS。
   int _tab = 0;
+  int _sideTab = 0;
 
   /// 地図をタップして指定した、まだ検索していない地点。
   LatLng? _pickedPoint;
@@ -50,6 +58,7 @@ class _HomePageState extends State<HomePage> {
   @override
   void dispose() {
     _controller.dispose();
+    _browser.dispose();
     _list.dispose();
     _placeQuery.dispose();
     super.dispose();
@@ -62,6 +71,16 @@ class _HomePageState extends State<HomePage> {
     if (c.center == null) return;
     final located = c.center != _fittedCenter && c.source != LocationSource.manual;
     if (located || c.radius != _fittedRadius) _fitToSearchArea();
+  }
+
+  /// SNS のページをアプリ内ブラウザで開く（使えない端末では外部のブラウザで）。
+  void _openLink(String url) {
+    if (!SnsBrowserController.supported) {
+      openExternal(url);
+      return;
+    }
+    _browser.open(url);
+    setState(() => _wide ? _sideTab = 1 : _tab = 2);
   }
 
   void _relocate() {
@@ -288,8 +307,26 @@ class _HomePageState extends State<HomePage> {
           if (!wide) setState(() => _tab = 0);
           _addListing(_mapReady ? _map.camera.center : (_controller.center ?? const LatLng(35.681, 139.767)));
         },
+        onOpenLink: _openLink,
       ),
     );
+    final browser = SnsBrowser(controller: _browser);
+    // スマホの戻るボタン: SNS ではページを戻り、それ以外のタブからは地図に戻る
+    return PopScope(
+      canPop: wide || _tab == 0,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        if (_tab == 2 && _browser.canGoBack) {
+          _browser.back();
+        } else {
+          setState(() => _tab = 0);
+        }
+      },
+      child: _buildScaffold(context, wide, panel, browser),
+    );
+  }
+
+  Widget _buildScaffold(BuildContext context, bool wide, Widget panel, Widget browser) {
     return Scaffold(
       appBar: AppBar(
         title: Row(
@@ -339,6 +376,11 @@ class _HomePageState extends State<HomePage> {
               icon: const Icon(Icons.history),
             ),
           ),
+          IconButton(
+            tooltip: 'アプリ内で SNS を開く（Instagram にログインできます）',
+            onPressed: () => _openLink(_browser.url ?? SnsBrowserController.homeUrl),
+            icon: const FaIcon(FontAwesomeIcons.instagram, size: 20),
+          ),
           ListenableBuilder(
             listenable: _controller,
             builder: (context, _) => IconButton(
@@ -355,10 +397,43 @@ class _HomePageState extends State<HomePage> {
               children: [
                 Expanded(child: _buildMap(context)),
                 const VerticalDivider(width: 1),
-                SizedBox(width: 400, child: panel),
+                SizedBox(
+                  width: _sideTab == 0 ? 400 : 560,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                        child: ListenableBuilder(
+                          listenable: _controller,
+                          builder: (context, _) => SegmentedButton<int>(
+                            showSelectedIcon: false,
+                            segments: [
+                              ButtonSegment(
+                                value: 0,
+                                icon: const Icon(Icons.list, size: 18),
+                                label: Text('一覧 ${_controller.visiblePlaces.length}'),
+                              ),
+                              const ButtonSegment(
+                                value: 1,
+                                icon: FaIcon(FontAwesomeIcons.instagram, size: 16),
+                                label: Text('SNS'),
+                              ),
+                            ],
+                            selected: {_sideTab},
+                            onSelectionChanged: (v) => setState(() => _sideTab = v.first),
+                          ),
+                        ),
+                      ),
+                      Expanded(
+                        child: IndexedStack(index: _sideTab, sizing: StackFit.expand, children: [panel, browser]),
+                      ),
+                    ],
+                  ),
+                ),
               ],
             )
-          : IndexedStack(index: _tab, children: [_buildMap(context), panel]),
+          : IndexedStack(index: _tab, sizing: StackFit.expand, children: [_buildMap(context), panel, browser]),
       bottomNavigationBar: wide
           ? null
           : ListenableBuilder(
@@ -375,6 +450,7 @@ class _HomePageState extends State<HomePage> {
                     ),
                     label: '一覧',
                   ),
+                  const NavigationDestination(icon: FaIcon(FontAwesomeIcons.instagram, size: 20), label: 'SNS'),
                 ],
               ),
             ),
@@ -391,6 +467,8 @@ class _HomePageState extends State<HomePage> {
         final selected = c.selected;
         final places = c.visiblePlaces;
         final selectedVisible = selected != null && places.any((p) => p.id == selected.id);
+        // 一覧は近い順なので、先頭から上限まで（遠い場所は一覧でのみ表示）
+        final markers = places.length > _maxMarkers ? places.sublist(0, _maxMarkers) : places;
         final picked = _pickedPoint;
         return Stack(
           children: [
@@ -425,7 +503,7 @@ class _HomePageState extends State<HomePage> {
                   ]),
                 MarkerLayer(markers: [
                   // 遠い順に描いて、近い場所のマーカーを手前にする。
-                  for (final p in places.reversed)
+                  for (final p in markers.reversed)
                     if (p.id != selected?.id) _placeMarker(p, false),
                   if (center != null)
                     Marker(point: center, width: 22, height: 22, child: const _CurrentLocationDot()),
@@ -471,6 +549,13 @@ class _HomePageState extends State<HomePage> {
                     backgroundColor: scheme.surface.withValues(alpha: 0.9),
                     visualDensity: VisualDensity.compact,
                   ),
+                  if (places.length > _maxMarkers)
+                    Chip(
+                      avatar: const Icon(Icons.info_outline, size: 16),
+                      label: Text('地図には近い $_maxMarkers 件を表示（全 ${places.length} 件は一覧に）'),
+                      backgroundColor: scheme.surface.withValues(alpha: 0.9),
+                      visualDensity: VisualDensity.compact,
+                    ),
                 ],
               ),
             ),
@@ -506,6 +591,8 @@ class _HomePageState extends State<HomePage> {
                       child: PlaceDetailCard(
                         place: selected,
                         category: selected.primaryCategory(c.enabled),
+                        platforms: c.platforms,
+                        onOpenLink: _openLink,
                         onClose: () => c.select(null),
                         onEdit: selected.listing == null ? null : () => _editListing(selected.listing!),
                         onDelete: selected.listing == null ? null : () => _deleteListing(selected.listing!),
@@ -527,7 +614,7 @@ class _HomePageState extends State<HomePage> {
       width: size,
       height: size,
       child: Tooltip(
-        message: [place.name, ?place.instagram?.handle, ?place.kind].join('\n'),
+        message: [place.name, ?place.primaryLink(_controller.platforms)?.handle, ?place.kind].join('\n'),
         child: MouseRegion(
           cursor: SystemMouseCursors.click,
           child: GestureDetector(
@@ -536,6 +623,7 @@ class _HomePageState extends State<HomePage> {
               place: place,
               category: place.primaryCategory(_controller.enabled),
               selected: selected,
+              platforms: _controller.platforms,
             ),
           ),
         ),

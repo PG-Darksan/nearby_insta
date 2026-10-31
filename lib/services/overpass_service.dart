@@ -14,7 +14,7 @@ class Bounds {
 
 /// OpenStreetMap の Overpass API から、対象スポットの生データ（要素）を取得する。
 class OverpassService {
-  static const userAgent = 'nearby_insta/0.3 (+https://github.com/PG-Darksan/nearby_insta)';
+  static const userAgent = 'nearby_insta/0.4 (+https://github.com/PG-Darksan/nearby_insta)';
 
   /// 公開サーバーは混雑しやすいので、応答が遅いときは次のサーバーにも並行して問い合わせ、
   /// 最初に返ってきた結果を使う。
@@ -90,8 +90,10 @@ class OverpassService {
   static String buildQuery(Bounds b) {
     return '[out:json][timeout:90][bbox:${b.overpass}];'
         '('
-        'nwr["contact:instagram"];'
-        'nwr["instagram"];'
+        'nwr["contact:instagram"];nwr["instagram"];'
+        'nwr["contact:twitter"];nwr["twitter"];nwr["contact:x"];'
+        'nwr["contact:facebook"];nwr["facebook"];'
+        'nwr["contact:tiktok"];nwr["contact:youtube"];nwr["contact:line"];nwr["contact:threads"];'
         'nwr["amenity"="school"]["name"~"高等学校|高校|中等教育学校|high school",i];'
         'nwr["amenity"="school"]["isced:level"~"3"];'
         'nwr["amenity"~"^(university|college)\$"];'

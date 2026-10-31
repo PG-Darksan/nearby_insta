@@ -7,13 +7,18 @@ import 'package:path_provider/path_provider.dart';
 
 import '../models/place.dart';
 import 'overpass_service.dart';
+import 'spot_data_service.dart';
 
-/// 検索結果を約 2km 四方のタイルに分けて端末に保存し、次回以降は通信せずに再利用する。
-/// 足りないタイルだけを、中心に近い区画から順に Overpass API で取得する。
+/// 場所のデータを集める。日本国内は配信データ（[SpotDataService]）をタイル単位で読むのですぐに表示できる。
+/// 配信データの範囲外や配信サーバーに繋がらないときは Overpass API から取得し、
+/// 約 2km 四方のタイルに分けて端末に保存して次回以降は通信せずに再利用する。
 class PlaceRepository {
-  PlaceRepository({OverpassService? overpass}) : _overpass = overpass ?? OverpassService();
+  PlaceRepository({OverpassService? overpass, SpotDataService? spots})
+      : _overpass = overpass ?? OverpassService(),
+        _spots = spots ?? SpotDataService();
 
   final OverpassService _overpass;
+  final SpotDataService _spots;
 
   static const tileDeg = 0.02;
 
@@ -31,6 +36,44 @@ class PlaceRepository {
     LatLng center,
     int radiusMeters, {
     bool refresh = false,
+    required void Function(List<Map<String, dynamic>> elements, {required bool complete}) onElements,
+    void Function(String)? onStatus,
+  }) async {
+    final meta = await _spots.meta(refresh: refresh);
+    if (meta != null && meta.covers(center)) {
+      final loaded = <String, List<Map<String, dynamic>>>{};
+      List<Map<String, dynamic>> all() => [for (final e in loaded.values) ...e];
+      final keys = meta.tilesAround(center, radiusMeters);
+      try {
+        await _spots.tiles(
+          meta,
+          keys,
+          refresh: refresh,
+          onCached: (tiles) {
+            loaded.addAll(tiles);
+            final complete = tiles.length == keys.length;
+            if (tiles.isNotEmpty || complete) onElements(all(), complete: complete);
+            if (!complete) onStatus?.call('スポットデータを取得中…');
+          },
+          onFetched: (key, elements) {
+            loaded[key] = elements;
+            onElements(all(), complete: loaded.length == keys.length);
+          },
+        );
+        return;
+      } catch (e) {
+        // 1 枚も読めなければ Overpass API から取得する
+        if (loaded.isNotEmpty) rethrow;
+        onStatus?.call('配信データに繋がらないため、OpenStreetMap から直接取得します…');
+      }
+    }
+    await _loadFromOverpass(center, radiusMeters, refresh: refresh, onElements: onElements, onStatus: onStatus);
+  }
+
+  Future<void> _loadFromOverpass(
+    LatLng center,
+    int radiusMeters, {
+    required bool refresh,
     required void Function(List<Map<String, dynamic>> elements, {required bool complete}) onElements,
     void Function(String)? onStatus,
   }) async {

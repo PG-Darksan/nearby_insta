@@ -43,3 +43,9 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# スポットデータの作成（tool/build_data.py）
+/cache/
+/site/
+*.osm.pbf
+__pycache__/

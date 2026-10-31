@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:latlong2/latlong.dart';
 
 import 'listing.dart';
+import 'social.dart';
+
+export 'social.dart';
 
 /// 地図に表示する場所の種類。並び順がマーカーの色を決めるときの優先順位になる。
 enum PlaceCategory {
@@ -9,44 +12,13 @@ enum PlaceCategory {
   experience('有償体験', Icons.palette_outlined, Color(0xFFEF6C00)),
   highSchool('高校', Icons.school_outlined, Color(0xFF1E88E5)),
   university('大学', Icons.account_balance_outlined, Color(0xFF5E35B1)),
-  instagram('Instagram', Icons.camera_alt_outlined, Color(0xFFDD2A7B));
+  sns('SNS', Icons.alternate_email, Color(0xFFDD2A7B));
 
   const PlaceCategory(this.label, this.icon, this.color);
 
   final String label;
   final IconData icon;
   final Color color;
-}
-
-/// Instagram アカウントをどこで見つけたか。
-enum InstagramSource {
-  osm('OpenStreetMap'),
-  wikidata('Wikidata'),
-  website('公式サイトに掲載');
-
-  const InstagramSource(this.label);
-  final String label;
-}
-
-class InstagramLink {
-  const InstagramLink(this.url, this.username, [this.source = InstagramSource.osm]);
-
-  final String url;
-  final String? username;
-  final InstagramSource source;
-
-  String get handle => username != null ? '@$username' : 'Instagram の場所ページ';
-
-  factory InstagramLink.user(String username, InstagramSource source) =>
-      InstagramLink('https://www.instagram.com/$username/', username, source);
-
-  Map<String, dynamic> toJson() => {'url': url, 'username': username, 'source': source.name};
-
-  factory InstagramLink.fromJson(Map<String, dynamic> json) => InstagramLink(
-        json['url'] as String,
-        json['username'] as String?,
-        InstagramSource.values.byName(json['source'] as String),
-      );
 }
 
 /// OSM 上の場所、またはユーザーが登録した募集情報。
@@ -56,14 +28,15 @@ class Place {
     required this.name,
     required this.position,
     required Set<PlaceCategory> categories,
-    List<InstagramLink>? instagrams,
+    List<SocialLink>? links,
     this.kind,
     this.address,
     this.website,
     this.wikidata,
     this.listing,
+    this.precomputed = false,
   })  : _baseCategories = categories,
-        instagrams = instagrams ?? [];
+        links = links ?? [];
 
   /// OSM なら `node/123`、登録した募集なら `listing/<id>`。
   final String id;
@@ -71,8 +44,8 @@ class Place {
   final LatLng position;
   final Set<PlaceCategory> _baseCategories;
 
-  /// OSM のタグ・Wikidata・公式サイトから見つかった Instagram アカウント。
-  final List<InstagramLink> instagrams;
+  /// OSM のタグ・Wikidata・公式サイトから見つかった SNS アカウント。
+  final List<SocialLink> links;
 
   /// 「カフェ」「高等学校」のような細かい種別。
   final String? kind;
@@ -83,29 +56,42 @@ class Place {
   /// ユーザーが登録した募集情報の場合のみ。
   final UserListing? listing;
 
+  /// 配信データで Wikidata・公式サイトの確認まで済んでいるもの（アプリで調べ直さない）。
+  final bool precomputed;
+
   double distanceMeters = 0;
 
-  Set<PlaceCategory> get categories =>
-      instagrams.isEmpty ? _baseCategories : {..._baseCategories, PlaceCategory.instagram};
+  Set<PlaceCategory> get categories => links.isEmpty ? _baseCategories : {..._baseCategories, PlaceCategory.sns};
 
-  InstagramLink? get instagram => instagrams.isEmpty ? null : instagrams.first;
+  /// SNS 以外のカテゴリ。
+  Set<PlaceCategory> get baseCategories => _baseCategories;
 
   bool get isListing => listing != null;
 
   String? get osmUrl => isListing ? null : 'https://www.openstreetmap.org/$id';
 
-  /// 名前で Instagram を Web 検索する URL（OSM などに登録がない場合の手がかり）。
-  String get instagramSearchUrl =>
-      'https://www.google.com/search?q=${Uri.encodeQueryComponent('site:instagram.com "$name"')}';
+  /// SNS 以外のカテゴリ（学校など）に当てはまるか。公式サイトを調べる対象になる。
+  bool get isInstitution => _baseCategories.isNotEmpty;
 
-  /// Instagram 以外のカテゴリ（学校など）に当てはまるか。公式サイトを調べる対象になる。
-  bool get isInstitution => _baseCategories.any((c) => c != PlaceCategory.instagram);
+  bool hasLinkOn(Set<SnsPlatform> platforms) => links.any((l) => platforms.contains(l.platform));
 
-  void addInstagrams(Iterable<InstagramLink> links) {
-    for (final link in links) {
-      final key = (link.username ?? link.url).toLowerCase();
-      if (instagrams.any((l) => (l.username ?? l.url).toLowerCase() == key)) continue;
-      instagrams.add(link);
+  /// [platforms] の中で最初に表示するアカウント（SNS の並び順で決める）。
+  SocialLink? primaryLink([Set<SnsPlatform>? platforms]) {
+    for (final p in SnsPlatform.values) {
+      if (platforms != null && !platforms.contains(p)) continue;
+      for (final l in links) {
+        if (l.platform == p) return l;
+      }
+    }
+    return null;
+  }
+
+  /// SNS の並び順に並べたアカウント。
+  List<SocialLink> get sortedLinks => [...links]..sort((a, b) => a.platform.index.compareTo(b.platform.index));
+
+  void addLinks(Iterable<SocialLink> found) {
+    for (final link in found) {
+      if (!links.contains(link)) links.add(link);
     }
   }
 
@@ -121,12 +107,13 @@ class Place {
   bool matches(String query) {
     final q = query.trim().toLowerCase();
     if (q.isEmpty) return true;
-    return [name, kind, ...instagrams.map((l) => l.username), listing?.organizer, listing?.description]
+    return [name, kind, address, ...links.map((l) => l.username), listing?.organizer, listing?.description]
         .whereType<String>()
         .any((s) => s.toLowerCase().contains(q));
   }
 
-  /// Overpass API の要素 1 件から生成する。どのカテゴリにも当てはまらなければ null。
+  /// Overpass API（または配信データ）の要素 1 件から生成する。どのカテゴリにも当てはまらなければ null。
+  /// 配信データの要素には、Wikidata・公式サイトで見つけた分も含めた `sns` が（空でも）付いている。
   static Place? fromOsm(Map<String, dynamic> element) {
     final tags = (element['tags'] as Map?)?.cast<String, dynamic>() ?? const {};
     // 「ボランティア通り」のような道路名や停留所は除く。
@@ -135,23 +122,26 @@ class Place {
     final pos = positionOf(element);
     if (pos == null) return null;
 
-    final rawIg = (tags['contact:instagram'] ?? tags['instagram']) as String?;
-    final instagram = rawIg == null ? null : parseInstagram(rawIg);
-    final name = (tags['name:ja'] ?? tags['name'] ?? tags['brand'] ?? instagram?.username) as String?;
+    final precomputed = element['sns'] is List;
+    final links = precomputed
+        ? [for (final j in element['sns'] as List) ?SocialLink.fromJson(j)]
+        : socialFromTags(tags);
+    final name = (tags['name:ja'] ?? tags['name'] ?? tags['brand'] ?? links.firstOrNull?.username) as String?;
 
-    final categories = classify(tags, name ?? '', hasInstagram: false);
-    if ((categories.isEmpty && instagram == null) || name == null) return null;
+    final categories = classify(tags, name ?? '');
+    if ((categories.isEmpty && links.isEmpty) || name == null) return null;
 
     return Place(
       id: '${element['type']}/${element['id']}',
       name: name,
       position: pos,
       categories: categories,
-      instagrams: [?instagram],
+      links: links,
       kind: _kindOf(tags, categories),
       address: _addressOf(tags),
       website: (tags['contact:website'] ?? tags['website']) as String?,
       wikidata: tags['wikidata'] as String?,
+      precomputed: precomputed,
     );
   }
 
@@ -163,13 +153,13 @@ class Place {
   }
 }
 
-/// Overpass の要素一覧を場所の一覧にする。建物とノードの両方に登録された同じ施設は 1 件にまとめる。
+/// 要素の一覧を場所の一覧にする。建物とノードの両方に登録された同じ施設は 1 件にまとめる。
 List<Place> placesFromOsm(List<Map<String, dynamic>> elements) {
   final seen = <String>{};
   return [
     for (final el in elements)
       if (Place.fromOsm(el) case final place?)
-        if (seen.add('${place.name}|${place.instagram?.url ?? ''}'.toLowerCase())) place,
+        if (seen.add('${place.name}|${place.primaryLink()?.url ?? ''}'.toLowerCase())) place,
   ];
 }
 
@@ -178,11 +168,10 @@ final _volunteerName = RegExp(r'ボランティア|社会福祉協議会|市民�
 final _experienceName = RegExp(r'体験|ワークショップ|workshop|陶芸', caseSensitive: false);
 const _experienceCrafts = {'pottery', 'glassblower'};
 
-Set<PlaceCategory> classify(Map<String, dynamic> tags, String name, {required bool hasInstagram}) {
+Set<PlaceCategory> classify(Map<String, dynamic> tags, String name) {
   final amenity = tags['amenity'];
   final isced = (tags['isced:level'] as String? ?? '').split(RegExp('[;,]')).map((s) => s.trim());
   return {
-    if (hasInstagram) PlaceCategory.instagram,
     if (amenity == 'school' && (_highSchoolName.hasMatch(name) || isced.contains('3')))
       PlaceCategory.highSchool,
     if (amenity == 'university' || (amenity == 'college' && name.contains('大学')))
@@ -191,31 +180,6 @@ Set<PlaceCategory> classify(Map<String, dynamic> tags, String name, {required bo
     if (_experienceName.hasMatch(name) || _experienceCrafts.contains(tags['craft']))
       PlaceCategory.experience,
   };
-}
-
-final _profileUrl = RegExp(r'instagram\.com/([A-Za-z0-9._]{1,30})/?(?:[?#].*)?$', caseSensitive: false);
-final _bareUsername = RegExp(r'^@?([A-Za-z0-9._]{1,30})$');
-const reservedInstagramPaths = {
-  'explore', 'p', 'reel', 'reels', 'stories', 'tv', 'accounts', 'about', 'developer', 'legal', 'direct', 'web',
-  'static', 'embed', 'oauth', 'share', 'sharer', 'intent', 'instagram',
-};
-
-/// OSM の `contact:instagram` タグの値（ユーザー名 / URL / `;` 区切りの複数値）を解釈する。
-/// ユーザー名が取れるものを優先し、なければ最初の Instagram URL を返す。
-InstagramLink? parseInstagram(String raw) {
-  String? fallbackUrl;
-  for (final part in raw.split(';').map((s) => s.trim()).where((s) => s.isNotEmpty)) {
-    final bare = _bareUsername.firstMatch(part);
-    if (bare != null) return InstagramLink.user(bare.group(1)!, InstagramSource.osm);
-    final m = _profileUrl.firstMatch(part);
-    if (m != null && !reservedInstagramPaths.contains(m.group(1)!.toLowerCase())) {
-      return InstagramLink.user(m.group(1)!, InstagramSource.osm);
-    }
-    if (fallbackUrl == null && part.toLowerCase().contains('instagram.com/')) {
-      fallbackUrl = part.startsWith('http') ? part : 'https://$part';
-    }
-  }
-  return fallbackUrl == null ? null : InstagramLink(fallbackUrl, null);
 }
 
 const _kindLabels = {

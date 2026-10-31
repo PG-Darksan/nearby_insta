@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 
 import '../controllers/nearby_controller.dart';
 import '../models/place.dart';
@@ -13,12 +14,14 @@ class SidePanel extends StatelessWidget {
     required this.scrollController,
     required this.onSelect,
     required this.onAddListing,
+    required this.onOpenLink,
   });
 
   final NearbyController controller;
   final ScrollController scrollController;
   final ValueChanged<Place> onSelect;
   final VoidCallback onAddListing;
+  final OpenLink onOpenLink;
 
   @override
   Widget build(BuildContext context) {
@@ -57,6 +60,7 @@ class SidePanel extends StatelessWidget {
                   padding: const EdgeInsets.only(top: 4),
                   child: Text(c.locationNote!, style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant)),
                 ),
+              if (c.center != null && !c.locating) _NearbyPostsButton(controller: c, onOpenLink: onOpenLink),
               const SizedBox(height: 12),
               Text('検索範囲', style: text.labelMedium),
               const SizedBox(height: 6),
@@ -91,6 +95,28 @@ class SidePanel extends StatelessWidget {
                     ),
                 ],
               ),
+              if (c.enabled.contains(PlaceCategory.sns)) ...[
+                const SizedBox(height: 6),
+                Wrap(
+                  spacing: 4,
+                  runSpacing: 4,
+                  children: [
+                    for (final p in SnsPlatform.values)
+                      if (c.countOfPlatform(p) > 0 || !c.platforms.contains(p))
+                        FilterChip(
+                          avatar: FaIcon(p.icon, size: 13, color: p.color),
+                          label: Text('${p.label} ${c.countOfPlatform(p)}', style: text.labelSmall),
+                          selected: c.platforms.contains(p),
+                          showCheckmark: false,
+                          selectedColor: p.color.withValues(alpha: 0.12),
+                          side: BorderSide(color: c.platforms.contains(p) ? p.color : scheme.outlineVariant),
+                          visualDensity: const VisualDensity(horizontal: -4, vertical: -4),
+                          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          onSelected: (_) => c.togglePlatform(p),
+                        ),
+                  ],
+                ),
+              ],
               const SizedBox(height: 12),
               TextField(
                 decoration: const InputDecoration(
@@ -113,12 +139,12 @@ class SidePanel extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text('${places.length} 件', style: text.labelLarge),
-                    for (final s in [if (c.searching) c.status ?? '検索中…', ?c.instagramStatus])
+                    for (final s in [if (c.searching) c.status ?? '検索中…', ?c.snsStatus])
                       Text(s, style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant), maxLines: 2),
                   ],
                 ),
               ),
-              if (c.busy || c.instagramStatus != null)
+              if (c.busy || c.snsStatus != null)
                 const Padding(
                   padding: EdgeInsets.only(right: 8),
                   child: SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
@@ -137,7 +163,7 @@ class SidePanel extends StatelessWidget {
         Padding(
           padding: const EdgeInsets.all(10),
           child: Text(
-            'データ: © OpenStreetMap contributors ／ 「登録した募集」はこの端末に保存',
+            'データ: © OpenStreetMap contributors・Wikidata・各施設の公式サイト ／ 「登録した募集」はこの端末に保存',
             style: text.labelSmall?.copyWith(color: scheme.onSurfaceVariant),
             textAlign: TextAlign.center,
           ),
@@ -174,7 +200,9 @@ class SidePanel extends StatelessWidget {
         place: places[i],
         category: places[i].primaryCategory(c.enabled),
         selected: places[i].id == c.selectedId,
+        platforms: c.platforms,
         onTap: () => onSelect(places[i]),
+        onOpenLink: onOpenLink,
       ),
     );
   }
@@ -185,6 +213,50 @@ class SidePanel extends StatelessWidget {
         LocationSource.manual => Icons.push_pin_outlined,
         null => Icons.location_searching,
       };
+}
+
+/// 検索地点の付近の投稿を、各 SNS の検索で探すメニュー。
+/// 個人のアカウントは公開データに位置がないので、SNS 自身の検索（ログイン中のアカウントで）を使う。
+class _NearbyPostsButton extends StatelessWidget {
+  const _NearbyPostsButton({required this.controller, required this.onOpenLink});
+
+  final NearbyController controller;
+  final OpenLink onOpenLink;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = controller;
+    final center = c.center!;
+    final km = (c.radius / 1000).clamp(0.3, 20.0);
+    final area = c.centerName?.replaceFirst(RegExp(r'[一二三四五六七八九十〇]+丁目$'), '');
+    final geocode = 'geocode:${center.latitude.toStringAsFixed(4)},${center.longitude.toStringAsFixed(4)},'
+        '${km < 1 ? '${(km * 1000).round()}m' : '${km.round()}km'}';
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: MenuAnchor(
+        menuChildren: [
+          MenuItemButton(
+            leadingIcon: FaIcon(SnsPlatform.x.icon, size: 16),
+            onPressed: () => onOpenLink(SnsPlatform.x.searchUrl(geocode)),
+            child: Text('X: この範囲（半径 ${km < 1 ? '${(km * 1000).round()}m' : '${km.round()}km'}）の位置情報つきの投稿'),
+          ),
+          if (area != null && area.isNotEmpty)
+            for (final p in [SnsPlatform.instagram, SnsPlatform.x, SnsPlatform.tiktok, SnsPlatform.threads])
+              MenuItemButton(
+                leadingIcon: SizedBox(width: 18, child: Center(child: FaIcon(p.icon, size: 16, color: p.color))),
+                onPressed: () => onOpenLink(p.searchUrl(area)),
+                child: Text('${p.label}: 「$area」で検索'),
+              ),
+        ],
+        builder: (context, menu, _) => OutlinedButton.icon(
+          style: OutlinedButton.styleFrom(visualDensity: VisualDensity.compact),
+          onPressed: () => menu.isOpen ? menu.close() : menu.open(),
+          icon: const Icon(Icons.forum_outlined, size: 18),
+          label: const Text('この付近の投稿を SNS で見る（個人のアカウントなど）'),
+        ),
+      ),
+    );
+  }
 }
 
 class _Message extends StatelessWidget {

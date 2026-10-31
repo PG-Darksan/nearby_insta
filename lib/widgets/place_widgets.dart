@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../models/place.dart';
@@ -9,82 +10,83 @@ const instagramGradient = LinearGradient(
   colors: [Color(0xFFF58529), Color(0xFFDD2A7B), Color(0xFF8134AF), Color(0xFF515BD4)],
 );
 
-const instagramPink = Color(0xFFC13584);
+/// SNS のページを開く（アプリ内ブラウザが使えればそこで、なければ外部で）。
+typedef OpenLink = void Function(String url);
 
 String formatDistance(double meters) =>
     meters < 1000 ? '${meters.round()} m' : '${(meters / 1000).toStringAsFixed(1)} km';
 
 Future<void> openExternal(String url) {
-  final uri = Uri.parse(url.startsWith('http') ? url : 'https://$url');
+  final uri = Uri.parse(url.startsWith('http') || url.contains(':') ? url : 'https://$url');
   return launchUrl(uri, mode: LaunchMode.externalApplication);
 }
 
-/// 地図のマーカー。登録した募集は角丸の四角、OSM の場所は丸で描く。
+/// 地図のマーカー。登録した募集は角丸の四角、OSM の場所は丸で描く。SNS は種類ごとのアイコン。
 class PlaceMarker extends StatelessWidget {
-  const PlaceMarker({super.key, required this.place, required this.category, required this.selected});
+  const PlaceMarker({
+    super.key,
+    required this.place,
+    required this.category,
+    required this.selected,
+    this.platforms,
+  });
 
   final Place place;
   final PlaceCategory category;
   final bool selected;
+  final Set<SnsPlatform>? platforms;
 
   @override
   Widget build(BuildContext context) {
     final size = selected ? 46.0 : 32.0;
-    final isInstagram = category == PlaceCategory.instagram;
+    final platform = category == PlaceCategory.sns ? place.primaryLink(platforms)?.platform : null;
+    final isInstagram = platform == SnsPlatform.instagram;
     return AnimatedContainer(
       duration: const Duration(milliseconds: 150),
       width: size,
       height: size,
+      alignment: Alignment.center,
       decoration: BoxDecoration(
         shape: place.isListing ? BoxShape.rectangle : BoxShape.circle,
         borderRadius: place.isListing ? BorderRadius.circular(size * 0.28) : null,
-        color: isInstagram ? null : category.color,
+        color: isInstagram ? null : (platform?.color ?? category.color),
         gradient: isInstagram ? instagramGradient : null,
         border: Border.all(color: Colors.white, width: selected ? 3 : 2),
         boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4, offset: Offset(0, 2))],
       ),
-      child: Icon(category.icon, color: Colors.white, size: size * 0.52),
+      child: platform != null
+          ? FaIcon(platform.icon, color: Colors.white, size: size * 0.46)
+          : Icon(category.icon, color: Colors.white, size: size * 0.52),
     );
   }
 }
 
-/// 一覧用のアイコン。Instagram は頭文字、それ以外はカテゴリのアイコンを表示する。
+/// 一覧用のアイコン。SNS は種類ごとのアイコン、それ以外はカテゴリのアイコンを表示する。
 class PlaceAvatar extends StatelessWidget {
-  const PlaceAvatar({super.key, required this.place, required this.category, this.size = 44});
+  const PlaceAvatar({super.key, required this.place, required this.category, this.size = 44, this.platforms});
 
   final Place place;
   final PlaceCategory category;
   final double size;
+  final Set<SnsPlatform>? platforms;
 
   @override
   Widget build(BuildContext context) {
-    if (category != PlaceCategory.instagram) {
-      return Container(
-        width: size,
-        height: size,
-        decoration: BoxDecoration(
-          color: category.color.withValues(alpha: 0.12),
-          shape: place.isListing ? BoxShape.rectangle : BoxShape.circle,
-          borderRadius: place.isListing ? BorderRadius.circular(size * 0.28) : null,
-          border: Border.all(color: category.color, width: 2),
-        ),
-        child: Icon(category.icon, color: category.color, size: size * 0.5),
-      );
-    }
-    final initial = (place.instagram?.username ?? place.name).characters.first.toUpperCase();
+    final platform = category == PlaceCategory.sns ? place.primaryLink(platforms)?.platform : null;
+    final color = platform?.color ?? category.color;
     return Container(
       width: size,
       height: size,
-      padding: const EdgeInsets.all(2),
-      decoration: const BoxDecoration(shape: BoxShape.circle, gradient: instagramGradient),
-      child: Container(
-        decoration: BoxDecoration(shape: BoxShape.circle, color: Theme.of(context).colorScheme.surface),
-        alignment: Alignment.center,
-        child: Text(
-          initial,
-          style: TextStyle(fontSize: size * 0.4, fontWeight: FontWeight.w700, color: instagramPink),
-        ),
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.10),
+        shape: place.isListing ? BoxShape.rectangle : BoxShape.circle,
+        borderRadius: place.isListing ? BorderRadius.circular(size * 0.28) : null,
+        border: Border.all(color: color, width: 2),
       ),
+      child: platform != null
+          ? FaIcon(platform.icon, color: color, size: size * 0.44)
+          : Icon(category.icon, color: color, size: size * 0.5),
     );
   }
 }
@@ -134,6 +136,8 @@ class PlaceTile extends StatelessWidget {
     required this.category,
     required this.selected,
     required this.onTap,
+    required this.onOpenLink,
+    this.platforms,
   });
 
   static const height = 76.0;
@@ -142,29 +146,40 @@ class PlaceTile extends StatelessWidget {
   final PlaceCategory category;
   final bool selected;
   final VoidCallback onTap;
+  final OpenLink onOpenLink;
+  final Set<SnsPlatform>? platforms;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final text = Theme.of(context).textTheme;
     final listing = place.listing;
+    final link = place.primaryLink(platforms);
     final (String? subtitle, Color? subtitleColor) = switch (place) {
       _ when listing != null => (
           [listing.organizer, listing.fee, listing.schedule].whereType<String>().join(' · '),
           null
         ),
-      Place(instagram: final ig?) => (ig.handle, instagramPink),
+      _ when link != null => (
+          [link.handle, if (place.links.length > 1) '他 ${place.links.length - 1} 件'].join('  '),
+          link.platform.color
+        ),
       _ => (place.address, null),
     };
+    // 種類ごとに 1 つずつ、最大 3 つのボタンを並べる
+    final buttons = <SocialLink>[];
+    for (final l in place.sortedLinks) {
+      if (buttons.length < 3 && !buttons.any((b) => b.platform == l.platform)) buttons.add(l);
+    }
     return Material(
       color: selected ? scheme.primaryContainer.withValues(alpha: 0.6) : Colors.transparent,
       child: InkWell(
         onTap: onTap,
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
+          padding: const EdgeInsets.only(left: 16, right: 8),
           child: Row(
             children: [
-              PlaceAvatar(place: place, category: category),
+              PlaceAvatar(place: place, category: category, platforms: platforms),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
@@ -189,11 +204,12 @@ class PlaceTile extends StatelessWidget {
                   ],
                 ),
               ),
-              if (place.instagram != null)
+              for (final b in buttons)
                 IconButton(
-                  tooltip: 'Instagram で開く',
-                  icon: const Icon(Icons.camera_alt_outlined, size: 20, color: instagramPink),
-                  onPressed: () => openExternal(place.instagram!.url),
+                  tooltip: '${b.platform.label} で開く（${b.handle}）',
+                  visualDensity: VisualDensity.compact,
+                  icon: FaIcon(b.platform.icon, size: 18, color: b.platform.color),
+                  onPressed: () => onOpenLink(b.url),
                 ),
             ],
           ),
@@ -203,17 +219,19 @@ class PlaceTile extends StatelessWidget {
   }
 }
 
-/// 詳細カード内の Instagram アカウント 1 件（見つけた場所も添える）。
-class _InstagramRow extends StatelessWidget {
-  const _InstagramRow({required this.link});
+/// 詳細カード内の SNS アカウント 1 件（見つけた場所も添える）。
+class _SnsRow extends StatelessWidget {
+  const _SnsRow({required this.link, required this.onOpenLink});
 
-  final InstagramLink link;
+  final SocialLink link;
+  final OpenLink onOpenLink;
 
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
+    final color = link.platform.color;
     return InkWell(
-      onTap: () => openExternal(link.url),
+      onTap: () => onOpenLink(link.url),
       borderRadius: BorderRadius.circular(4),
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 2),
@@ -221,8 +239,8 @@ class _InstagramRow extends StatelessWidget {
           crossAxisAlignment: WrapCrossAlignment.center,
           spacing: 6,
           children: [
-            const Icon(Icons.camera_alt_outlined, size: 16, color: instagramPink),
-            Text(link.handle, style: text.bodyMedium?.copyWith(color: instagramPink, fontWeight: FontWeight.w600)),
+            SizedBox(width: 18, child: Center(child: FaIcon(link.platform.icon, size: 15, color: color))),
+            Text(link.handle, style: text.bodyMedium?.copyWith(color: color, fontWeight: FontWeight.w600)),
             Text('（${link.source.label}）',
                 style: text.bodySmall?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant)),
           ],
@@ -239,6 +257,8 @@ class PlaceDetailCard extends StatelessWidget {
     required this.place,
     required this.category,
     required this.onClose,
+    required this.onOpenLink,
+    this.platforms,
     this.onEdit,
     this.onDelete,
   });
@@ -246,6 +266,8 @@ class PlaceDetailCard extends StatelessWidget {
   final Place place;
   final PlaceCategory category;
   final VoidCallback onClose;
+  final OpenLink onOpenLink;
+  final Set<SnsPlatform>? platforms;
   final VoidCallback? onEdit;
   final VoidCallback? onDelete;
 
@@ -254,7 +276,7 @@ class PlaceDetailCard extends StatelessWidget {
     final text = Theme.of(context).textTheme;
     final scheme = Theme.of(context).colorScheme;
     final listing = place.listing;
-    final ig = place.instagram;
+    final link = place.primaryLink(platforms) ?? place.primaryLink();
     final details = <(IconData, String)>[
       if (listing?.organizer case final v?) (Icons.groups_outlined, v),
       if (listing?.fee case final v?) (Icons.payments_outlined, v),
@@ -269,7 +291,7 @@ class PlaceDetailCard extends StatelessWidget {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            PlaceAvatar(place: place, category: category, size: 52),
+            PlaceAvatar(place: place, category: category, size: 52, platforms: platforms),
             const SizedBox(width: 14),
             Expanded(
               child: Column(
@@ -277,12 +299,12 @@ class PlaceDetailCard extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(place.name, style: text.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
-                  for (final link in place.instagrams) _InstagramRow(link: link),
+                  for (final l in place.sortedLinks) _SnsRow(link: l, onOpenLink: onOpenLink),
                   const SizedBox(height: 4),
                   CategoryBadges(place: place),
                   const SizedBox(height: 4),
                   Text(
-                    [?place.kind, '現在地から ${formatDistance(place.distanceMeters)}'].join(' · '),
+                    [?place.kind, '検索地点から ${formatDistance(place.distanceMeters)}'].join(' · '),
                     style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
                   ),
                   if (listing?.description case final d? when d.isNotEmpty)
@@ -306,19 +328,14 @@ class PlaceDetailCard extends StatelessWidget {
                   Wrap(
                     spacing: 8,
                     runSpacing: 8,
+                    crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
-                      if (ig != null)
-                        DecoratedBox(
-                          decoration: BoxDecoration(
-                            gradient: instagramGradient,
-                            borderRadius: BorderRadius.circular(20),
-                          ),
-                          child: FilledButton.icon(
-                            style: FilledButton.styleFrom(backgroundColor: Colors.transparent),
-                            onPressed: () => openExternal(ig.url),
-                            icon: const Icon(Icons.camera_alt_outlined, size: 18),
-                            label: const Text('Instagram で開く'),
-                          ),
+                      if (link != null)
+                        FilledButton.icon(
+                          style: FilledButton.styleFrom(backgroundColor: link.platform.color),
+                          onPressed: () => onOpenLink(link.url),
+                          icon: FaIcon(link.platform.icon, size: 16),
+                          label: Text('${link.platform.label} で開く'),
                         ),
                       if (place.website case final url?)
                         OutlinedButton.icon(
@@ -326,12 +343,7 @@ class PlaceDetailCard extends StatelessWidget {
                           icon: const Icon(Icons.language, size: 18),
                           label: Text(listing != null ? '詳細ページ' : 'Web サイト'),
                         ),
-                      if (!place.isListing)
-                        TextButton.icon(
-                          onPressed: () => openExternal(place.instagramSearchUrl),
-                          icon: const Icon(Icons.manage_search, size: 18),
-                          label: const Text('Instagram で探す'),
-                        ),
+                      if (!place.isListing) SnsSearchButton(query: place.name, onOpenLink: onOpenLink),
                       if (place.osmUrl case final url?)
                         TextButton.icon(
                           onPressed: () => openExternal(url),
@@ -359,6 +371,49 @@ class PlaceDetailCard extends StatelessWidget {
             IconButton(onPressed: onClose, icon: const Icon(Icons.close), tooltip: '閉じる'),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// 名前で各 SNS を検索するメニュー。データにないアカウントや、その場所についての投稿を探すのに使う。
+class SnsSearchButton extends StatelessWidget {
+  const SnsSearchButton({super.key, required this.query, required this.onOpenLink, this.label = 'SNS で探す'});
+
+  final String query;
+  final OpenLink onOpenLink;
+  final String label;
+
+  static const _platforms = [
+    SnsPlatform.instagram,
+    SnsPlatform.x,
+    SnsPlatform.tiktok,
+    SnsPlatform.threads,
+    SnsPlatform.facebook,
+    SnsPlatform.youtube,
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return MenuAnchor(
+      menuChildren: [
+        for (final p in _platforms)
+          MenuItemButton(
+            leadingIcon: SizedBox(width: 20, child: Center(child: FaIcon(p.icon, size: 16, color: p.color))),
+            onPressed: () => onOpenLink(p.searchUrl(query)),
+            child: Text('${p.label} で「$query」を検索'),
+          ),
+        MenuItemButton(
+          leadingIcon: const Icon(Icons.travel_explore, size: 20),
+          onPressed: () => openExternal('https://www.google.com/search?q=${Uri.encodeQueryComponent('"$query" '
+              '(site:instagram.com OR site:x.com OR site:facebook.com OR site:tiktok.com)')}'),
+          child: const Text('Google で SNS のアカウントを探す'),
+        ),
+      ],
+      builder: (context, menu, _) => TextButton.icon(
+        onPressed: () => menu.isOpen ? menu.close() : menu.open(),
+        icon: const Icon(Icons.manage_search, size: 18),
+        label: Text(label),
       ),
     );
   }

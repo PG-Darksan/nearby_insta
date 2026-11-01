@@ -2,12 +2,16 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../models/social.dart';
 import '../widgets/place_widgets.dart';
+
+/// Instagram のアカウント検索で、検索欄に自動で入力できたか。
+enum InstagramSearchStatus { none, waitingForLogin, searching, failed }
 
 /// アプリ内の SNS ブラウザの状態。地図や一覧からアカウントを開くときにも使う。
 ///
@@ -42,9 +46,14 @@ class SnsBrowserController extends ChangeNotifier {
   InAppWebViewController? _web;
   String? _pending;
 
-  /// ページを読み込んだら Instagram の検索欄に入れる言葉。
+  /// ページを読み込んだら Instagram の検索欄に入れる言葉。[_searchId] は検索し直すたびに増やす。
   String? _pendingSearch;
+  int _searchId = 0;
   bool _searching = false;
+
+  /// 最後に Instagram で検索した言葉と、検索欄に入力できたか（画面上部の案内に使う）。
+  String? searchQuery;
+  InstagramSearchStatus searchStatus = InstagramSearchStatus.none;
 
   String? url;
   String? title;
@@ -57,6 +66,13 @@ class SnsBrowserController extends ChangeNotifier {
 
   /// [target] を開く。まだ WebView がなければ作られたときに開く。
   void open(String target) {
+    _pendingSearch = null; // ほかのページを開いたら、ログイン後などに検索するのはやめる
+    _searchId++;
+    searchStatus = InstagramSearchStatus.none;
+    _load(target);
+  }
+
+  void _load(String target) {
     started = true;
     if (_web case final web?) {
       web.loadUrl(urlRequest: URLRequest(url: WebUri(target)));
@@ -66,61 +82,117 @@ class SnsBrowserController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Instagram のアカウント検索の画面。ログインしていなければ、ログインした後にこの画面に戻る。
+  static const searchUrl = 'https://www.instagram.com/explore/search/';
+
   /// Instagram で [query] のアカウントを検索する。Web 版の Instagram には検索結果を開く URL がないので、
-  /// トップページを開いてから検索欄に入力する。ログインしていなければ、ログインした後に入力する。
+  /// 検索画面を開いてから検索欄に入力する。ログインしていなければ、ログインした後に入力する。
   void searchInstagram(String query) {
     _pendingSearch = query;
-    open(homeUrl);
+    _searchId++;
+    searchQuery = query;
+    searchStatus = InstagramSearchStatus.searching;
+    _load(searchUrl);
+  }
+
+  void dismissSearch() {
+    searchStatus = InstagramSearchStatus.none;
+    notifyListeners();
+  }
+
+  void _setSearchStatus(InstagramSearchStatus status) {
+    if (searchStatus == status) return;
+    searchStatus = status;
+    notifyListeners();
   }
 
   Future<void> _runPendingSearch() async {
     final query = _pendingSearch;
+    final id = _searchId;
     final web = _web;
     if (query == null || web == null || _searching) return;
     final current = Uri.tryParse(url ?? '');
-    if (current == null || !current.host.endsWith('instagram.com')) {
-      _pendingSearch = null; // ほかのサイトに移ったので検索しない
+    if (current == null || !current.host.endsWith('instagram.com')) return;
+    if (current.path.startsWith('/accounts/') || current.path.startsWith('/challenge/')) {
+      // ログイン画面。ログインすると検索画面に戻るので、そのときに入力する
+      _setSearchStatus(InstagramSearchStatus.waitingForLogin);
       return;
     }
-    if (current.path.startsWith('/accounts/')) return; // ログイン画面。ログイン後に読み込み直したら検索する
     _searching = true;
+    _setSearchStatus(InstagramSearchStatus.searching);
+    String? result;
     try {
-      final result = await web.callAsyncJavaScript(functionBody: _searchScript, arguments: {'query': query});
-      if (result?.value == true && _pendingSearch == query) _pendingSearch = null;
+      final value = await web
+          .callAsyncJavaScript(functionBody: _searchScript, arguments: {'query': query})
+          .timeout(const Duration(seconds: 20));
+      result = value?.value as String?;
     } catch (e) {
       debugPrint('Instagram の検索欄に入力できませんでした: $e');
     } finally {
       _searching = false;
     }
+    if (id != _searchId) {
+      // 入力している間に検索し直した。読み込み終わったときの呼び出しは入力中で飛ばしているので、ここで入力する
+      await _runPendingSearch();
+      return;
+    }
+    switch (result) {
+      case 'done':
+        _pendingSearch = null;
+        _setSearchStatus(InstagramSearchStatus.none);
+      case 'login':
+        // トップページのログイン欄。ログインしてページが移ったら入力する
+        _setSearchStatus(InstagramSearchStatus.waitingForLogin);
+      case 'moved':
+        break; // 検索画面に移るので、読み込み終わったら入力する
+      case 'failed':
+        _pendingSearch = null;
+        _setSearchStatus(InstagramSearchStatus.failed);
+      default:
+        // 入力中にページが移ったときなど。次にページを読み込んだときにもう一度試す
+        _setSearchStatus(InstagramSearchStatus.failed);
+    }
   }
 
-  /// 検索欄（PC はサイドバーの「検索」、スマホは「検索とインスピレーション」の上部）を開いて [query] を入れる。
-  static const _searchScript = '''
+  /// 検索欄に [query] を入れる。検索欄がなければ、PC 向けの表示ではサイドバーの「検索」を押し、
+  /// それでも出なければ検索画面に移る（'moved'）。ログインしていなければ 'login' を返す。
+  /// Instagram の入力欄（React）はキー入力と同じイベントでないと値の変化に気づかないので、insertText で入力する。
+  static const _searchScript = r'''
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const findInput = () => document.querySelector(
-  'input[aria-label="検索語句"], input[aria-label="Search input"], input[placeholder="検索"], input[placeholder="Search"]');
+const visible = (el) => el.getClientRects().length > 0;
+const findInput = () => [...document.querySelectorAll('input')].find((input) =>
+  (input.type === 'text' || input.type === 'search') && visible(input) &&
+  /検索|search/i.test((input.getAttribute('aria-label') || '') + ' ' + (input.placeholder || '')));
 let clicked = false;
-for (let i = 0; i < 40; i++) {
+for (let i = 0; i < 60; i++) {
+  if ([...document.querySelectorAll('input[type="password"]')].some(visible)) return 'login';
   const input = findInput();
   if (input) {
-    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
     input.focus();
-    setValue.call(input, query);
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-    return true;
+    input.select();
+    if (!document.execCommand('insertText', false, query) || input.value !== query) {
+      const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setValue.call(input, query);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    return input.value === query ? 'done' : 'failed';
   }
-  if (!clicked) {
+  if (!clicked && i >= 8) {
     const icon = [...document.querySelectorAll('svg[aria-label]')].find((svg) =>
-      /^(検索|Search|検索とインスピレーション|Search & Explore|Explore)\$/.test(svg.getAttribute('aria-label')));
+      /^(検索|Search)$/.test(svg.getAttribute('aria-label')));
     const button = icon && icon.closest('a, [role="button"], [role="link"]');
     if (button) {
       button.click();
       clicked = true;
     }
   }
+  if (i === 20 && !location.pathname.startsWith('/explore/search')) {
+    setTimeout(() => location.assign('/explore/search/'), 300);
+    return 'moved';
+  }
   await sleep(250);
 }
-return false;
+return 'failed';
 ''';
 
   void back() => _web?.goBack();
@@ -156,11 +228,16 @@ return false;
   }
 }
 
-/// SNS を表示するアプリ内ブラウザ。上部のボタンで各 SNS のトップページを開ける。
+/// SNS を表示するアプリ内ブラウザ。上部のメニューで各 SNS のトップページを開ける。
+/// ページを広く表示できるように、操作ボタンは 1 行にまとめる。
 class SnsBrowser extends StatelessWidget {
-  const SnsBrowser({super.key, required this.controller});
+  const SnsBrowser({super.key, required this.controller, this.expanded = false, this.onToggleExpanded});
 
   final SnsBrowserController controller;
+
+  /// 地図などを隠して広げて表示しているか。
+  final bool expanded;
+  final VoidCallback? onToggleExpanded;
 
   static const _homes = {
     SnsPlatform.instagram: 'https://www.instagram.com/',
@@ -170,6 +247,17 @@ class SnsBrowser extends StatelessWidget {
     SnsPlatform.threads: 'https://www.threads.com/',
     SnsPlatform.youtube: 'https://www.youtube.com/',
   };
+
+  /// いま開いているページの SNS（切り替えボタンのアイコンに使う）。
+  static SnsPlatform? _platformOf(String? url) {
+    final host = Uri.tryParse(url ?? '')?.host;
+    if (host == null || host.isEmpty) return null;
+    for (final MapEntry(key: platform, value: home) in _homes.entries) {
+      final domain = Uri.parse(home).host.replaceFirst('www.', '');
+      if (host == domain || host.endsWith('.$domain')) return platform;
+    }
+    return null;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -187,20 +275,22 @@ class SnsBrowser extends StatelessWidget {
           Material(
             color: scheme.surfaceContainer,
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+              padding: const EdgeInsets.symmetric(horizontal: 2),
               child: Row(
                 children: [
                   IconButton(
                     tooltip: '戻る',
+                    visualDensity: VisualDensity.compact,
                     onPressed: c.canGoBack ? c.back : null,
                     icon: const Icon(Icons.arrow_back),
                   ),
                   IconButton(
-                    tooltip: '進む',
-                    onPressed: c.canGoForward ? c.forward : null,
-                    icon: const Icon(Icons.arrow_forward),
+                    tooltip: '再読み込み',
+                    visualDensity: VisualDensity.compact,
+                    onPressed: c.reload,
+                    icon: const Icon(Icons.refresh),
                   ),
-                  IconButton(tooltip: '再読み込み', onPressed: c.reload, icon: const Icon(Icons.refresh)),
+                  const SizedBox(width: 4),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -215,10 +305,34 @@ class SnsBrowser extends StatelessWidget {
                       ],
                     ),
                   ),
+                  PopupMenuButton<SnsPlatform>(
+                    tooltip: 'SNS を切り替え',
+                    icon: FaIcon(_platformOf(c.url)?.icon ?? FontAwesomeIcons.globe, size: 18),
+                    onSelected: (platform) => c.open(_homes[platform]!),
+                    itemBuilder: (context) => [
+                      for (final platform in _homes.keys)
+                        PopupMenuItem(
+                          value: platform,
+                          child: ListTile(
+                            leading: FaIcon(platform.icon, size: 18, color: platform.color),
+                            title: Text(platform.label),
+                          ),
+                        ),
+                    ],
+                  ),
+                  if (onToggleExpanded case final toggle?)
+                    IconButton(
+                      tooltip: expanded ? '元の大きさに戻す' : '広げて表示',
+                      visualDensity: VisualDensity.compact,
+                      onPressed: toggle,
+                      icon: Icon(expanded ? Icons.close_fullscreen : Icons.open_in_full),
+                    ),
                   PopupMenuButton<String>(
                     tooltip: 'メニュー',
                     onSelected: (v) async {
-                      if (v == 'external') {
+                      if (v == 'forward') {
+                        c.forward();
+                      } else if (v == 'external') {
                         openExternal(c.url ?? SnsBrowserController.homeUrl);
                       } else if (v == 'logout') {
                         final ok = await showDialog<bool>(
@@ -235,12 +349,17 @@ class SnsBrowser extends StatelessWidget {
                         if (ok == true) await c.clearLogin();
                       }
                     },
-                    itemBuilder: (context) => const [
+                    itemBuilder: (context) => [
                       PopupMenuItem(
+                        value: 'forward',
+                        enabled: c.canGoForward,
+                        child: const ListTile(leading: Icon(Icons.arrow_forward), title: Text('進む')),
+                      ),
+                      const PopupMenuItem(
                         value: 'external',
                         child: ListTile(leading: Icon(Icons.open_in_new), title: Text('外部のブラウザ・アプリで開く')),
                       ),
-                      PopupMenuItem(
+                      const PopupMenuItem(
                         value: 'logout',
                         child: ListTile(leading: Icon(Icons.logout), title: Text('ログイン情報を消去')),
                       ),
@@ -250,29 +369,9 @@ class SnsBrowser extends StatelessWidget {
               ),
             ),
           ),
-          SizedBox(
-            height: 40,
-            child: ListView(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              children: [
-                for (final MapEntry(key: platform, value: url) in _homes.entries)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 6),
-                    child: ActionChip(
-                      visualDensity: VisualDensity.compact,
-                      avatar: FaIcon(platform.icon, size: 14, color: platform.color),
-                      label: Text(platform.label),
-                      onPressed: () => c.open(url),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-          SizedBox(
-            height: 2,
-            child: c.progress < 1 ? LinearProgressIndicator(value: c.progress) : null,
-          ),
+          if (c.searchQuery case final query? when c.searchStatus != InstagramSearchStatus.none)
+            _SearchBanner(query: query, status: c.searchStatus, onClose: c.dismissSearch),
+          SizedBox(height: 2, child: c.progress < 1 ? LinearProgressIndicator(value: c.progress) : null),
           Expanded(
             child: c.started ? _WebView(controller: c) : _Intro(onStart: () => c.open(SnsBrowserController.homeUrl)),
           ),
@@ -292,7 +391,8 @@ class _WebView extends StatelessWidget {
     final c = controller;
     return InAppWebView(
       webViewEnvironment: SnsBrowserController._environment,
-      initialUrlRequest: URLRequest(url: WebUri(c._pending ?? SnsBrowserController.homeUrl)),
+      // 画面の幅が変わって作り直したときは、開いていたページを開き直す
+      initialUrlRequest: URLRequest(url: WebUri(c._pending ?? c.url ?? SnsBrowserController.homeUrl)),
       initialSettings: InAppWebViewSettings(
         thirdPartyCookiesEnabled: true,
         useShouldOverrideUrlLoading: true,
@@ -325,6 +425,63 @@ class _WebView extends StatelessWidget {
         c._updateHistory();
         c._runPendingSearch();
       },
+    );
+  }
+}
+
+/// Instagram のアカウント検索の状況。検索欄に入力できなかったときは、検索する言葉をコピーできるようにする。
+class _SearchBanner extends StatelessWidget {
+  const _SearchBanner({required this.query, required this.status, required this.onClose});
+
+  final String query;
+  final InstagramSearchStatus status;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final failed = status == InstagramSearchStatus.failed;
+    final message = switch (status) {
+      InstagramSearchStatus.waitingForLogin => 'ログインすると「$query」のアカウントを検索します',
+      InstagramSearchStatus.failed => '検索欄に入力できませんでした。「$query」をコピーして検索欄に貼り付けてください',
+      _ => '「$query」のアカウントを検索しています…',
+    };
+    return Material(
+      color: failed ? scheme.errorContainer : scheme.secondaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 0, 0, 0),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                message,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: failed ? scheme.onErrorContainer : scheme.onSecondaryContainer),
+              ),
+            ),
+            if (failed)
+              TextButton(
+                onPressed: () async {
+                  await Clipboard.setData(ClipboardData(text: query));
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('「$query」をコピーしました')));
+                  }
+                },
+                child: const Text('コピー'),
+              ),
+            IconButton(
+              tooltip: '閉じる',
+              visualDensity: VisualDensity.compact,
+              iconSize: 18,
+              onPressed: onClose,
+              icon: const Icon(Icons.close),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

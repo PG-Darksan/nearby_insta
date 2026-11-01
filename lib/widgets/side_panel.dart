@@ -5,6 +5,7 @@ import '../controllers/nearby_controller.dart';
 import '../models/place.dart';
 import '../services/location_service.dart';
 import 'place_widgets.dart';
+import 'search_filters.dart';
 
 /// 検索条件と結果一覧。PC では地図の右、スマホでは「一覧」タブに表示する。
 class SidePanel extends StatelessWidget {
@@ -71,89 +72,7 @@ class SidePanel extends StatelessWidget {
                       if (c.center != null && !c.locating) _AreaAccountsButton(
                           controller: c, onOpenLink: onOpenLink, onSearchInstagram: onSearchInstagram),
                       const SizedBox(height: 12),
-                      Text('検索範囲', style: text.labelMedium),
-                      const SizedBox(height: 6),
-                      SizedBox(
-                        width: double.infinity,
-                        child: SegmentedButton<int>(
-                          showSelectedIcon: false,
-                          style: const ButtonStyle(visualDensity: VisualDensity.compact),
-                          segments: [
-                            for (final r in NearbyController.radiusOptions)
-                              ButtonSegment(value: r, label: Text(r < 1000 ? '${r}m' : '${r ~/ 1000}km')),
-                          ],
-                          selected: {c.radius},
-                          onSelectionChanged: (s) => c.setRadius(s.first),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      Wrap(
-                        spacing: 6,
-                        runSpacing: 6,
-                        children: [
-                          for (final cat in PlaceCategory.values)
-                            FilterChip(
-                              avatar: Icon(cat.icon, size: 18, color: cat.color),
-                              label: Text('${cat.label} ${c.countOf(cat)}'),
-                              selected: c.enabled.contains(cat),
-                              showCheckmark: false,
-                              selectedColor: cat.color.withValues(alpha: 0.16),
-                              side: BorderSide(color: c.enabled.contains(cat) ? cat.color : scheme.outlineVariant),
-                              visualDensity: VisualDensity.compact,
-                              onSelected: (_) => c.toggleCategory(cat),
-                            ),
-                        ],
-                      ),
-                      if (c.enabled.contains(PlaceCategory.sns)) ...[
-                        const SizedBox(height: 6),
-                        Wrap(
-                          spacing: 4,
-                          runSpacing: 4,
-                          children: [
-                            for (final p in SnsPlatform.values)
-                              if (c.countOfPlatform(p) > 0 || !c.platforms.contains(p))
-                                FilterChip(
-                                  avatar: FaIcon(p.icon, size: 13, color: p.color),
-                                  label: Text('${p.label} ${c.countOfPlatform(p)}', style: text.labelSmall),
-                                  selected: c.platforms.contains(p),
-                                  showCheckmark: false,
-                                  selectedColor: p.color.withValues(alpha: 0.12),
-                                  side: BorderSide(color: c.platforms.contains(p) ? p.color : scheme.outlineVariant),
-                                  visualDensity: const VisualDensity(horizontal: -4, vertical: -4),
-                                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                                  onSelected: (_) => c.togglePlatform(p),
-                                ),
-                          ],
-                        ),
-                      ],
-                      const SizedBox(height: 6),
-                      Row(
-                        children: [
-                          Text('対象', style: text.labelMedium?.copyWith(color: scheme.onSurfaceVariant)),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Wrap(
-                              spacing: 4,
-                              runSpacing: 4,
-                              children: [
-                                for (final a in Audience.values)
-                                  FilterChip(
-                                    tooltip: a == Audience.none ? 'OSM のタグや名前から判定できないもの' : null,
-                                    avatar: Icon(a.icon, size: 14, color: a.color),
-                                    label: Text('${a.label} ${c.countOfAudience(a)}', style: text.labelSmall),
-                                    selected: c.audiences.contains(a),
-                                    showCheckmark: false,
-                                    selectedColor: a.color.withValues(alpha: 0.12),
-                                    side: BorderSide(color: c.audiences.contains(a) ? a.color : scheme.outlineVariant),
-                                    visualDensity: const VisualDensity(horizontal: -4, vertical: -4),
-                                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                                    onSelected: (_) => c.toggleAudience(a),
-                                  ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
+                      SearchFilters(controller: c),
                       const SizedBox(height: 12),
                       TextField(
                         decoration: const InputDecoration(

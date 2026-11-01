@@ -12,6 +12,7 @@ import '../services/location_service.dart';
 import '../services/search_history.dart';
 import '../widgets/listing_dialog.dart';
 import '../widgets/place_widgets.dart';
+import '../widgets/search_filters.dart';
 import '../widgets/side_panel.dart';
 import 'sns_browser.dart';
 
@@ -42,6 +43,9 @@ class _HomePageState extends State<HomePage> {
   /// スマホ: 0 地図 / 1 一覧 / 2 SNS。PC の右側: 0 一覧 / 1 SNS。
   int _tab = 0;
   int _sideTab = 0;
+
+  /// SNS を広げて表示しているか（PC は地図を、スマホは下のタブを隠す）。
+  bool _browserExpanded = false;
 
   /// 地図をタップして指定した、まだ検索していない地点。
   LatLng? _pickedPoint;
@@ -254,7 +258,7 @@ class _HomePageState extends State<HomePage> {
             child: ListTile(
               leading: const Icon(Icons.history),
               title: Text(h.label),
-              subtitle: Text('${_radiusLabel(h.radius)} · ${_ago(h.at)}'),
+              subtitle: Text('${radiusLabel(h.radius)} · ${_ago(h.at)}'),
             ),
           ),
         const PopupMenuDivider(),
@@ -267,8 +271,6 @@ class _HomePageState extends State<HomePage> {
       _controller.clearHistory();
     }
   }
-
-  static String _radiusLabel(int r) => r < 1000 ? '${r}m' : '${r ~/ 1000}km';
 
   static String _ago(DateTime at) {
     final d = DateTime.now().difference(at);
@@ -321,7 +323,11 @@ class _HomePageState extends State<HomePage> {
         onSearchInstagram: _searchInstagram,
       ),
     );
-    final browser = SnsBrowser(controller: _browser);
+    final browser = SnsBrowser(
+      controller: _browser,
+      expanded: _browserExpanded,
+      onToggleExpanded: () => setState(() => _browserExpanded = !_browserExpanded),
+    );
     // スマホの戻るボタン: SNS ではページを戻り、それ以外のタブからは地図に戻る
     return PopScope(
       canPop: wide || _tab == 0,
@@ -329,6 +335,8 @@ class _HomePageState extends State<HomePage> {
         if (didPop) return;
         if (_tab == 2 && _browser.canGoBack) {
           _browser.back();
+        } else if (_tab == 2 && _browserExpanded) {
+          setState(() => _browserExpanded = false);
         } else {
           setState(() => _tab = 0);
         }
@@ -338,8 +346,10 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _buildScaffold(BuildContext context, bool wide, Widget panel, Widget browser) {
+    // スマホの SNS タブでは上のバーを隠して、SNS のページを広く表示する（広げたときは下のタブも隠す）
+    final snsTab = !wide && _tab == 2;
     return Scaffold(
-      appBar: AppBar(
+      appBar: snsTab ? null : AppBar(
         title: Row(
           children: [
             ShaderMask(
@@ -404,12 +414,60 @@ class _HomePageState extends State<HomePage> {
         ],
       ),
       body: wide
-          ? Row(
+          ? _buildWideBody(context, panel, browser)
+          : IndexedStack(
+              index: _tab,
+              sizing: StackFit.expand,
+              children: [_buildMap(context), panel, SafeArea(child: browser)],
+            ),
+      bottomNavigationBar: wide || (snsTab && _browserExpanded)
+          ? null
+          : ListenableBuilder(
+              listenable: _controller,
+              builder: (context, _) => NavigationBar(
+                selectedIndex: _tab,
+                onDestinationSelected: (i) => setState(() => _tab = i),
+                destinations: [
+                  const NavigationDestination(icon: Icon(Icons.map_outlined), label: '地図'),
+                  NavigationDestination(
+                    icon: Badge(
+                      label: Text('${_controller.visiblePlaces.length}'),
+                      child: const Icon(Icons.list),
+                    ),
+                    label: '一覧',
+                  ),
+                  const NavigationDestination(icon: FaIcon(FontAwesomeIcons.instagram, size: 20), label: 'SNS'),
+                ],
+              ),
+            ),
+    );
+  }
+
+  /// PC: 左に地図、右に一覧か SNS。SNS は画面の半分ほどの幅で表示し、広げると地図を隠して全体に表示する。
+  /// SNS のページ（WebView）を作り直さないように、広げても配置は変えずに大きさだけを変える。
+  Widget _buildWideBody(BuildContext context, Widget panel, Widget browser) {
+    return LayoutBuilder(builder: (context, box) {
+      final total = box.maxWidth;
+      final normal = _sideTab == 0 ? 400.0 : math.min(math.max(560.0, total * 0.5), total - 280);
+      final full = _sideTab == 1 && _browserExpanded;
+      return Stack(
+        children: [
+          Positioned(
+            left: 0,
+            top: 0,
+            bottom: 0,
+            width: total - normal - 1,
+            child: Offstage(offstage: full, child: _buildMap(context)),
+          ),
+          Positioned(
+            right: 0,
+            top: 0,
+            bottom: 0,
+            width: full ? total : normal + 1,
+            child: Row(
               children: [
-                Expanded(child: _buildMap(context)),
                 const VerticalDivider(width: 1),
-                SizedBox(
-                  width: _sideTab == 0 ? 400 : 560,
+                Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
@@ -443,29 +501,11 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ),
               ],
-            )
-          : IndexedStack(index: _tab, sizing: StackFit.expand, children: [_buildMap(context), panel, browser]),
-      bottomNavigationBar: wide
-          ? null
-          : ListenableBuilder(
-              listenable: _controller,
-              builder: (context, _) => NavigationBar(
-                selectedIndex: _tab,
-                onDestinationSelected: (i) => setState(() => _tab = i),
-                destinations: [
-                  const NavigationDestination(icon: Icon(Icons.map_outlined), label: '地図'),
-                  NavigationDestination(
-                    icon: Badge(
-                      label: Text('${_controller.visiblePlaces.length}'),
-                      child: const Icon(Icons.list),
-                    ),
-                    label: '一覧',
-                  ),
-                  const NavigationDestination(icon: FaIcon(FontAwesomeIcons.instagram, size: 20), label: 'SNS'),
-                ],
-              ),
             ),
-    );
+          ),
+        ],
+      );
+    });
   }
 
   Widget _buildMap(BuildContext context) {
@@ -538,35 +578,46 @@ class _HomePageState extends State<HomePage> {
             ),
             Positioned(
               top: 12,
-              left: 12,
-              right: 12,
-              child: Wrap(
-                spacing: 8,
-                runSpacing: 8,
+              left: 0,
+              right: 0,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  FilledButton.tonalIcon(
-                    onPressed: c.busy ? null : _relocate,
-                    icon: const Icon(Icons.my_location, size: 18),
-                    label: const Text('現在地で検索'),
-                  ),
-                  FilledButton.tonalIcon(
-                    onPressed: !_mapReady ? null : () => _searchAt(_map.camera.center),
-                    icon: const Icon(Icons.travel_explore, size: 18),
-                    label: const Text('地図の中心で検索'),
-                  ),
-                  Chip(
-                    avatar: const Icon(Icons.touch_app_outlined, size: 16),
-                    label: const Text('地図をタップして地点を指定'),
-                    backgroundColor: scheme.surface.withValues(alpha: 0.9),
-                    visualDensity: VisualDensity.compact,
-                  ),
-                  if (places.length > _maxMarkers)
-                    Chip(
-                      avatar: const Icon(Icons.info_outline, size: 16),
-                      label: Text('地図には近い $_maxMarkers 件を表示（全 ${places.length} 件は一覧に）'),
-                      backgroundColor: scheme.surface.withValues(alpha: 0.9),
-                      visualDensity: VisualDensity.compact,
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    child: Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        FilledButton.tonalIcon(
+                          onPressed: c.busy ? null : _relocate,
+                          icon: const Icon(Icons.my_location, size: 18),
+                          label: const Text('現在地で検索'),
+                        ),
+                        FilledButton.tonalIcon(
+                          onPressed: !_mapReady ? null : () => _searchAt(_map.camera.center),
+                          icon: const Icon(Icons.travel_explore, size: 18),
+                          label: const Text('地図の中心で検索'),
+                        ),
+                        // 地点の指定の案内は PC だけ（スマホは場所をとるので、代わりに検索範囲と種類のボタンを出す）
+                        if (_wide)
+                          Chip(
+                            avatar: const Icon(Icons.touch_app_outlined, size: 16),
+                            label: const Text('地図をタップして地点を指定'),
+                            backgroundColor: scheme.surface.withValues(alpha: 0.9),
+                            visualDensity: VisualDensity.compact,
+                          ),
+                        if (places.length > _maxMarkers)
+                          Chip(
+                            avatar: const Icon(Icons.info_outline, size: 16),
+                            label: Text('地図には近い $_maxMarkers 件を表示（全 ${places.length} 件は一覧に）'),
+                            backgroundColor: scheme.surface.withValues(alpha: 0.9),
+                            visualDensity: VisualDensity.compact,
+                          ),
+                      ],
                     ),
+                  ),
+                  if (!_wide) ...[const SizedBox(height: 8), MapFilterBar(controller: c)],
                 ],
               ),
             ),
@@ -579,7 +630,7 @@ class _HomePageState extends State<HomePage> {
                   alignment: Alignment.bottomLeft,
                   child: _PickedPointCard(
                     point: picked,
-                    radiusLabel: _radiusLabel(c.radius),
+                    radiusLabel: radiusLabel(c.radius),
                     onSearch: () => _searchAt(picked),
                     onAddListing: () => _addListing(picked),
                     onClose: () => setState(() => _pickedPoint = null),

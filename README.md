@@ -24,10 +24,11 @@
 - **対象（女性向け・男女兼用・男性向け）で絞り込み**: OSM の `female` / `male` / `unisex` / `hairdresser=barber` / `clothes` のタグと、名前（レディース・メンズ・理容・女子大学など）から、お店や学校が誰向けかを判定して絞り込める。判定できないものは「指定なし」
 - **タグ付けされた投稿**: 詳細カードの「タグ付けされた投稿」から、Instagram のアカウントがタグ付けされた投稿、X・Threads・Bluesky でのメンション、Instagram の場所ページ（その場所でタグ付けされた投稿。Wikidata に場所 ID がある所）をアプリ内ブラウザで開く
 - **この地域のアカウントを探す**: 検索地点の地名（例: 六浦）で Instagram のアカウント検索を開く。X のボタンでは、その地名をプロフィールに書いているユーザーを X のユーザー検索で探す。個人のアカウントはここから探せる
-- **Instagram で探す**: データにアカウントがない場所も、詳細カードから名前（支店名・地名つき）で Instagram のアカウントを検索できる。Web 版の Instagram には検索結果を開く URL がないため、アプリ内ブラウザで Instagram を開いて検索欄に自動で入力する（ログインが必要）
+- **Instagram で探す**: データにアカウントがない場所も、詳細カードから名前（支店名・地名つき）で Instagram のアカウントを検索できる。Web 版の Instagram には検索結果を開く URL がないため、アプリ内ブラウザで Instagram の検索画面を開いて検索欄に自動で入力する（ログインが必要。ログインしていなければ、ログインした後に入力する。入力できなかったときは、検索する言葉をコピーできる）
+- **SNS を広く表示**: アプリ内ブラウザの操作ボタンは 1 行にまとめ、スマホでは SNS タブの上のバーを隠す。右上の「広げて表示」で、PC では地図を、スマホでは下のタブも隠して全体に表示する
 - **支店名・地名つきの名前**: チェーン店などは OSM の `branch`（例: スシロー 金沢八景店）を付けて表示し、ない場合は近くの地名を括弧で付ける（例: スシロー（六浦））
 - 現在地の自動取得（端末の位置情報 → 使えない場合は IP アドレスからおおよその位置を推定）
-- 検索範囲の切り替え（300m / 1km / 3km / 5km / 10km / 20km）とカテゴリごとの表示切り替え
+- 検索範囲の切り替え（300m / 1km / 3km / 5km / 10km / 20km）とカテゴリごとの表示切り替え（スマホでは地図の上の「範囲」と種類のボタンでも変えられる。SNS の種類や対象は「絞り込み」から）
 - **地点の指定**: 地図をタップ →「ここから検索」、地名・住所での検索（国土地理院・Nominatim）、「地図の中心で検索」、右クリック／長押しメニュー
 - **検索履歴**（最大 15 件）からワンクリックで再表示。更新ボタンで最新のデータを取り直す
 - 名前・ユーザー名・種別・住所でのキーワード絞り込み
@@ -57,8 +58,8 @@
 
 [Releases](../../releases) から入手できます。
 
-- **Android**: `nearby_insta-android.apk` をインストール（提供元不明のアプリのインストールを許可する必要があります。デバッグ署名のため Google Play には公開できません）
-- **Windows**: `nearby_insta-windows-x64.zip` を展開して `nearby_insta.exe` を実行。アプリ内ブラウザには Microsoft Edge WebView2 ランタイム（Windows 10/11 には通常入っています）を使います
+- **Android**: `nearby_insta-<バージョン>-android.apk` をインストール（提供元不明のアプリのインストールを許可する必要があります。デバッグ署名のため Google Play には公開できません）
+- **Windows**: `nearby_insta-<バージョン>-windows-x64.zip` を展開して `nearby_insta.exe` を実行。アプリ内ブラウザには Microsoft Edge WebView2 ランタイム（Windows 10/11 には通常入っています）を使います
 
 ## ビルド方法
 
@@ -70,6 +71,8 @@ flutter test
 flutter build windows --release   # build/windows/x64/runner/Release/
 flutter build apk --release       # build/app/outputs/flutter-apk/app-release.apk
 ```
+
+リリースに載せるファイルは `pwsh tool/build_release.ps1`（`android` / `windows` で片方だけ）で作ります。`dist/` に `nearby_insta-<バージョン>-android.apk` と `nearby_insta-<バージョン>-windows-x64.zip` ができます（バージョンは `pubspec.yaml` から）。
 
 Windows ではプロジェクトのパスが長すぎるとビルドに失敗するため、`C:\Users\<名前>\nearby_insta` のような短いパスに置いてください。
 

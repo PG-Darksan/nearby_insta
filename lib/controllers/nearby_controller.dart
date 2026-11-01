@@ -186,6 +186,7 @@ class NearbyController extends ChangeNotifier {
   Future<void> setRadius(int value) {
     radius = value;
     _recompute();
+    notifyListeners(); // 現在地を取得中で検索しないときも、選んだ範囲を表示する
     return search();
   }
 

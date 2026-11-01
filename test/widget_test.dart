@@ -1,10 +1,13 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:nearby_insta/controllers/nearby_controller.dart';
 import 'package:nearby_insta/models/listing.dart';
 import 'package:nearby_insta/models/place.dart';
 import 'package:nearby_insta/services/overpass_service.dart';
 import 'package:nearby_insta/services/place_repository.dart';
 import 'package:nearby_insta/services/spot_data_service.dart';
+import 'package:nearby_insta/widgets/search_filters.dart';
 
 Map<String, dynamic> _node(int id, Map<String, String> tags) =>
     {'type': 'node', 'id': id, 'lat': 35.0, 'lon': 139.0, 'tags': tags};
@@ -327,5 +330,32 @@ void main() {
     expect(restored.position, const LatLng(35.1, 139.2));
     expect(restored.fee, '3,000円');
     expect(restored.toPlace().id, 'listing/abc');
+  });
+
+  testWidgets('地図の上のボタンで検索範囲と表示する種類を変えられる', (tester) async {
+    final c = NearbyController();
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(body: ListenableBuilder(listenable: c, builder: (context, _) => MapFilterBar(controller: c))),
+    ));
+    expect(find.text('範囲 1km'), findsOneWidget);
+    await tester.tap(find.text('範囲 1km'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('半径 3km'));
+    await tester.pumpAndSettle();
+    expect(c.radius, 3000);
+    expect(find.text('範囲 3km'), findsOneWidget);
+
+    // 種類のボタンは横にスクロールして選ぶ
+    final restaurant = find.textContaining(PlaceCategory.restaurant.label);
+    await tester.scrollUntilVisible(restaurant, 200, scrollable: find.byType(Scrollable).first);
+    await tester.tap(restaurant);
+    await tester.pump();
+    expect(c.enabled.contains(PlaceCategory.restaurant), isFalse);
+
+    await tester.scrollUntilVisible(find.text('絞り込み'), -200, scrollable: find.byType(Scrollable).first);
+    await tester.tap(find.text('絞り込み'));
+    await tester.pumpAndSettle();
+    expect(find.text('検索範囲'), findsOneWidget);
+    expect(find.text('対象'), findsOneWidget);
   });
 }

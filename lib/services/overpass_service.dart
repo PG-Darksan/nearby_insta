@@ -14,7 +14,7 @@ class Bounds {
 
 /// OpenStreetMap の Overpass API から、対象スポットの生データ（要素）を取得する。
 class OverpassService {
-  static const userAgent = 'nearby_insta/0.4 (+https://github.com/PG-Darksan/nearby_insta)';
+  static const userAgent = 'nearby_insta/0.6 (+https://github.com/PG-Darksan/nearby_insta)';
 
   /// 公開サーバーは混雑しやすいので、応答が遅いときは次のサーバーにも並行して問い合わせ、
   /// 最初に返ってきた結果を使う。
@@ -87,6 +87,7 @@ class OverpassService {
   }
 
   /// 小中学校は取らず、高校は名前か isced:level で絞って転送量を減らす（判定は classify と同じ）。
+  /// ボランティアは社協などの施設ではなく実際の開催地をイベント情報サイトから取得するため、ここには含めない。
   static String buildQuery(Bounds b) {
     return '[out:json][timeout:90][bbox:${b.overpass}];'
         '('
@@ -97,7 +98,6 @@ class OverpassService {
         'nwr["amenity"="school"]["name"~"高等学校|高校|中等教育学校|high school",i];'
         'nwr["amenity"="school"]["isced:level"~"3"];'
         'nwr["amenity"~"^(university|college)\$"];'
-        'nwr["name"~"ボランティア|社会福祉協議会|市民活動|NPOセンター|volunteer",i];'
         'nwr["name"~"体験|ワークショップ|workshop|陶芸",i];'
         'nwr["craft"~"^(pottery|glassblower)\$"];'
         'nwr["name"~"専門学校|専修学校|職業能力開発|ポリテク|職業訓練|通信制|通信教育|放送大学|通信大学|サイバー大学|'

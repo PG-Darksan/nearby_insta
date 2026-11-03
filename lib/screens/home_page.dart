@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -37,9 +38,11 @@ class _HomePageState extends State<HomePage> {
   final _map = MapController();
   final _list = ScrollController();
   final _placeQuery = TextEditingController();
+  Timer? _warmUpTimer;
   bool _mapReady = false;
   LatLng? _fittedCenter;
   int? _fittedRadius;
+
   /// スマホ: 0 地図 / 1 一覧 / 2 SNS。PC の右側: 0 一覧 / 1 SNS。
   int _tab = 0;
   int _sideTab = 0;
@@ -57,10 +60,17 @@ class _HomePageState extends State<HomePage> {
     super.initState();
     _controller.addListener(_onControllerChanged);
     _controller.init();
+    // 最初の Instagram アカウント検索でも待たずに切り替えられるよう、初期描画のあとに裏で検索画面を準備する
+    if (SnsBrowserController.supported) {
+      _warmUpTimer = Timer(const Duration(milliseconds: 500), () {
+        if (mounted) _browser.warmUp();
+      });
+    }
   }
 
   @override
   void dispose() {
+    _warmUpTimer?.cancel();
     _controller.dispose();
     _browser.dispose();
     _list.dispose();
@@ -95,6 +105,25 @@ class _HomePageState extends State<HomePage> {
     }
     _browser.searchInstagram(query);
     setState(() => _wide ? _sideTab = 1 : _tab = 2);
+  }
+
+  void _toggleHidden(Place place, bool hidden) {
+    _controller.setHidden(place, hidden);
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.clearSnackBars();
+    if (hidden) {
+      messenger.showSnackBar(
+        SnackBar(
+          duration: const Duration(seconds: 3),
+          content: Text('「${place.name}」を地図と一覧から非表示にしました'),
+          action: SnackBarAction(
+            label: '元に戻す',
+            onPressed: () => _controller.setHidden(place, false),
+          ),
+        ),
+      );
+    }
   }
 
   void _relocate() {
@@ -321,6 +350,7 @@ class _HomePageState extends State<HomePage> {
         },
         onOpenLink: _openLink,
         onSearchInstagram: _searchInstagram,
+        onToggleHidden: _toggleHidden,
       ),
     );
     final browser = SnsBrowser(
@@ -349,70 +379,75 @@ class _HomePageState extends State<HomePage> {
     // スマホの SNS タブでは上のバーを隠して、SNS のページを広く表示する（広げたときは下のタブも隠す）
     final snsTab = !wide && _tab == 2;
     return Scaffold(
-      appBar: snsTab ? null : AppBar(
-        title: Row(
-          children: [
-            ShaderMask(
-              shaderCallback: instagramGradient.createShader,
-              child: const Icon(Icons.travel_explore, color: Colors.white),
-            ),
-            const SizedBox(width: 10),
-            const Text('近くのスポット'),
-            if (wide) ...[
-              const SizedBox(width: 24),
-              SizedBox(
-                width: 320,
-                child: TextField(
-                  controller: _placeQuery,
-                  textInputAction: TextInputAction.search,
-                  decoration: InputDecoration(
-                    isDense: true,
-                    filled: true,
-                    hintText: '地名・住所で場所を探す',
-                    prefixIcon: const Icon(Icons.place_outlined),
-                    suffixIcon: IconButton(
-                      tooltip: '検索',
-                      icon: const Icon(Icons.search),
-                      onPressed: () => _searchPlaceName(_placeQuery.text),
-                    ),
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide.none),
+      appBar: snsTab
+          ? null
+          : AppBar(
+              title: Row(
+                children: [
+                  ShaderMask(
+                    shaderCallback: instagramGradient.createShader,
+                    child: const Icon(Icons.travel_explore, color: Colors.white),
                   ),
-                  onSubmitted: _searchPlaceName,
-                ),
+                  const SizedBox(width: 10),
+                  const Text('近くのスポット'),
+                  if (wide) ...[
+                    const SizedBox(width: 24),
+                    SizedBox(
+                      width: 320,
+                      child: TextField(
+                        controller: _placeQuery,
+                        textInputAction: TextInputAction.search,
+                        decoration: InputDecoration(
+                          isDense: true,
+                          filled: true,
+                          hintText: '地名・住所で場所を探す',
+                          prefixIcon: const Icon(Icons.place_outlined),
+                          suffixIcon: IconButton(
+                            tooltip: '検索',
+                            icon: const Icon(Icons.search),
+                            onPressed: () => _searchPlaceName(_placeQuery.text),
+                          ),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(24),
+                            borderSide: BorderSide.none,
+                          ),
+                        ),
+                        onSubmitted: _searchPlaceName,
+                      ),
+                    ),
+                  ],
+                ],
               ),
-            ],
-          ],
-        ),
-        actions: [
-          if (!wide)
-            IconButton(
-              tooltip: '地名・住所で探す',
-              onPressed: _openPlaceSearchDialog,
-              icon: const Icon(Icons.search),
+              actions: [
+                if (!wide)
+                  IconButton(
+                    tooltip: '地名・住所で探す',
+                    onPressed: _openPlaceSearchDialog,
+                    icon: const Icon(Icons.search),
+                  ),
+                Builder(
+                  builder: (anchor) => IconButton(
+                    tooltip: '検索履歴',
+                    onPressed: () => _showHistory(anchor),
+                    icon: const Icon(Icons.history),
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'アプリ内で SNS を開く（Instagram にログインできます）',
+                  onPressed: () => _openLink(_browser.url ?? SnsBrowserController.homeUrl),
+                  icon: const FaIcon(FontAwesomeIcons.instagram, size: 20),
+                ),
+                ListenableBuilder(
+                  listenable: _controller,
+                  builder: (context, _) => IconButton(
+                    tooltip: '最新のデータに更新',
+                    onPressed: _controller.busy ? null : () => _controller.search(refresh: true),
+                    icon: const Icon(Icons.refresh),
+                  ),
+                ),
+                const SizedBox(width: 8),
+              ],
             ),
-          Builder(
-            builder: (anchor) => IconButton(
-              tooltip: '検索履歴',
-              onPressed: () => _showHistory(anchor),
-              icon: const Icon(Icons.history),
-            ),
-          ),
-          IconButton(
-            tooltip: 'アプリ内で SNS を開く（Instagram にログインできます）',
-            onPressed: () => _openLink(_browser.url ?? SnsBrowserController.homeUrl),
-            icon: const FaIcon(FontAwesomeIcons.instagram, size: 20),
-          ),
-          ListenableBuilder(
-            listenable: _controller,
-            builder: (context, _) => IconButton(
-              tooltip: '最新のデータに更新',
-              onPressed: _controller.busy ? null : () => _controller.search(refresh: true),
-              icon: const Icon(Icons.refresh),
-            ),
-          ),
-          const SizedBox(width: 8),
-        ],
-      ),
       body: wide
           ? _buildWideBody(context, panel, browser)
           : IndexedStack(
@@ -444,11 +479,12 @@ class _HomePageState extends State<HomePage> {
   }
 
   /// PC: 左に地図、右に一覧か SNS。SNS は画面の半分ほどの幅で表示し、広げると地図を隠して全体に表示する。
-  /// SNS のページ（WebView）を作り直さないように、広げても配置は変えずに大きさだけを変える。
+  /// 一覧タブを表示している間も SNS 側の WebView を SNS 表示幅のまま保持し、タブ切り替え時のリサイズ遅延を防ぐ。
   Widget _buildWideBody(BuildContext context, Widget panel, Widget browser) {
     return LayoutBuilder(builder: (context, box) {
       final total = box.maxWidth;
-      final normal = _sideTab == 0 ? 400.0 : math.min(math.max(560.0, total * 0.5), total - 280);
+      final snsWidth = math.min(math.max(560.0, total * 0.5), total - 280);
+      final normal = _sideTab == 0 ? 400.0 : snsWidth;
       final full = _sideTab == 1 && _browserExpanded;
       return Stack(
         children: [
@@ -495,7 +531,24 @@ class _HomePageState extends State<HomePage> {
                         ),
                       ),
                       Expanded(
-                        child: IndexedStack(index: _sideTab, sizing: StackFit.expand, children: [panel, browser]),
+                        child: LayoutBuilder(
+                          builder: (context, inner) => IndexedStack(
+                            index: _sideTab,
+                            sizing: StackFit.expand,
+                            children: [
+                              panel,
+                              UnconstrainedBox(
+                                alignment: Alignment.topLeft,
+                                clipBehavior: Clip.hardEdge,
+                                child: SizedBox(
+                                  width: full ? math.max(0, total - 1) : snsWidth,
+                                  height: inner.maxHeight,
+                                  child: browser,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                       ),
                     ],
                   ),
@@ -588,6 +641,7 @@ class _HomePageState extends State<HomePage> {
                     child: Wrap(
                       spacing: 8,
                       runSpacing: 8,
+                      crossAxisAlignment: WrapCrossAlignment.center,
                       children: [
                         FilledButton.tonalIcon(
                           onPressed: c.busy ? null : _relocate,
@@ -599,14 +653,27 @@ class _HomePageState extends State<HomePage> {
                           icon: const Icon(Icons.travel_explore, size: 18),
                           label: const Text('地図の中心で検索'),
                         ),
-                        // 地点の指定の案内は PC だけ（スマホは場所をとるので、代わりに検索範囲と種類のボタンを出す）
-                        if (_wide)
+                        if (_wide) ...[
+                          FilledButton.tonalIcon(
+                            onPressed: () => showSearchFiltersSheet(context, c),
+                            icon: const Icon(Icons.checklist, size: 18),
+                            label: const Text('表示切替'),
+                          ),
+                          if (c.hiddenPlaces.isNotEmpty)
+                            ActionChip(
+                              avatar: Icon(Icons.visibility_off_outlined, size: 16, color: scheme.primary),
+                              label: Text('非表示 ${c.hiddenPlaces.length}件'),
+                              backgroundColor: scheme.surface.withValues(alpha: 0.92),
+                              visualDensity: VisualDensity.compact,
+                              onPressed: () => showHiddenPlacesSheet(context, c),
+                            ),
                           Chip(
                             avatar: const Icon(Icons.touch_app_outlined, size: 16),
                             label: const Text('地図をタップして地点を指定'),
                             backgroundColor: scheme.surface.withValues(alpha: 0.9),
                             visualDensity: VisualDensity.compact,
                           ),
+                        ],
                         if (places.length > _maxMarkers)
                           Chip(
                             avatar: const Icon(Icons.info_outline, size: 16),
@@ -637,7 +704,7 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ),
               ),
-            if (selected != null)
+            if (selected != null && selectedVisible)
               Positioned(
                 left: 12,
                 right: 12,
@@ -654,6 +721,8 @@ class _HomePageState extends State<HomePage> {
                         place: selected,
                         category: selected.primaryCategory(c.enabled),
                         platforms: c.platforms,
+                        isHidden: c.isHidden(selected.id),
+                        onToggleHidden: (hidden) => _toggleHidden(selected, hidden),
                         onOpenLink: _openLink,
                         onSearchInstagram: _searchInstagram,
                         onClose: () => c.select(null),

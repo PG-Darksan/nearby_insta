@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -19,6 +20,9 @@ enum InstagramSearchStatus { none, waitingForLogin, searching, failed }
 /// ログイン状態（Cookie）は WebView のデータとして端末に残るので、次回起動時もログインしたまま使える。
 class SnsBrowserController extends ChangeNotifier {
   static const homeUrl = 'https://www.instagram.com/';
+
+  /// Instagram のアカウント検索の画面。ログインしていなければ、ログインした後にこの画面に戻る。
+  static const searchUrl = 'https://www.instagram.com/explore/search/';
 
   /// Windows の WebView2 環境。ログイン状態の保存先をアプリのデータフォルダーにする。
   static WebViewEnvironment? _environment;
@@ -49,7 +53,7 @@ class SnsBrowserController extends ChangeNotifier {
   /// ページを読み込んだら Instagram の検索欄に入れる言葉。[_searchId] は検索し直すたびに増やす。
   String? _pendingSearch;
   int _searchId = 0;
-  bool _searching = false;
+  int _runningSearchId = 0;
 
   /// 最後に Instagram で検索した言葉と、検索欄に入力できたか（画面上部の案内に使う）。
   String? searchQuery;
@@ -61,8 +65,16 @@ class SnsBrowserController extends ChangeNotifier {
   bool canGoBack = false;
   bool canGoForward = false;
 
-  /// 一度でも開いたか（開くまでは WebView を作らない）。
+  /// 一度でも開いたか（[warmUp] または [open] / [searchInstagram] で WebView を起動する）。
   bool started = false;
+
+  /// 初回の Instagram アカウント検索でも待たずに切り替えられるよう、裏で検索画面を読み込んでおく。
+  void warmUp() {
+    if (started || !supported) return;
+    started = true;
+    _pending = searchUrl;
+    notifyListeners();
+  }
 
   /// [target] を開く。まだ WebView がなければ作られたときに開く。
   void open(String target) {
@@ -74,6 +86,7 @@ class SnsBrowserController extends ChangeNotifier {
 
   void _load(String target) {
     started = true;
+    url = target;
     if (_web case final web?) {
       web.loadUrl(urlRequest: URLRequest(url: WebUri(target)));
     } else {
@@ -82,15 +95,32 @@ class SnsBrowserController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Instagram のアカウント検索の画面。ログインしていなければ、ログインした後にこの画面に戻る。
-  static const searchUrl = 'https://www.instagram.com/explore/search/';
+  static bool _isInstagramHost(Uri? uri) =>
+      uri != null && (uri.host == 'instagram.com' || uri.host.endsWith('.instagram.com'));
 
-  /// Instagram で [query] のアカウントを検索する。Web 版の Instagram には検索結果を開く URL がないので、
-  /// 検索画面を開いてから検索欄に入力する。ログインしていなければ、ログインした後に入力する。
+  static bool _isInstagramLoginPath(Uri uri) =>
+      uri.path.startsWith('/accounts/') || uri.path.startsWith('/challenge/');
+
+  /// Instagram で [query] のアカウントを検索する。
+  /// すでに Instagram のページが開いていればページ全体の再読み込みは行わず、その場で検索欄を開いて即時入力する。
   void searchInstagram(String query) {
     _pendingSearch = query;
     _searchId++;
     searchQuery = query;
+
+    final current = Uri.tryParse(url ?? '');
+    if (_web != null && _isInstagramHost(current)) {
+      if (_isInstagramLoginPath(current!)) {
+        searchStatus = InstagramSearchStatus.waitingForLogin;
+        notifyListeners();
+        return;
+      }
+      searchStatus = InstagramSearchStatus.searching;
+      notifyListeners();
+      unawaited(_runPendingSearch());
+      return;
+    }
+
     searchStatus = InstagramSearchStatus.searching;
     _load(searchUrl);
   }
@@ -110,30 +140,29 @@ class SnsBrowserController extends ChangeNotifier {
     final query = _pendingSearch;
     final id = _searchId;
     final web = _web;
-    if (query == null || web == null || _searching) return;
+    if (query == null || web == null || _runningSearchId == id) return;
     final current = Uri.tryParse(url ?? '');
-    if (current == null || !current.host.endsWith('instagram.com')) return;
-    if (current.path.startsWith('/accounts/') || current.path.startsWith('/challenge/')) {
+    if (!_isInstagramHost(current)) return;
+    if (_isInstagramLoginPath(current!)) {
       // ログイン画面。ログインすると検索画面に戻るので、そのときに入力する
       _setSearchStatus(InstagramSearchStatus.waitingForLogin);
       return;
     }
-    _searching = true;
+    _runningSearchId = id;
     _setSearchStatus(InstagramSearchStatus.searching);
     String? result;
     try {
       final value = await web
-          .callAsyncJavaScript(functionBody: _searchScript, arguments: {'query': query})
-          .timeout(const Duration(seconds: 20));
+          .callAsyncJavaScript(functionBody: _searchScript, arguments: {'query': query, 'seq': id})
+          .timeout(const Duration(seconds: 15));
       result = value?.value as String?;
     } catch (e) {
       debugPrint('Instagram の検索欄に入力できませんでした: $e');
     } finally {
-      _searching = false;
+      if (_runningSearchId == id) _runningSearchId = 0;
     }
     if (id != _searchId) {
-      // 入力している間に検索し直した。読み込み終わったときの呼び出しは入力中で飛ばしているので、ここで入力する
-      await _runPendingSearch();
+      // より新しい検索に切り替え済み
       return;
     }
     switch (result) {
@@ -143,54 +172,96 @@ class SnsBrowserController extends ChangeNotifier {
       case 'login':
         // トップページのログイン欄。ログインしてページが移ったら入力する
         _setSearchStatus(InstagramSearchStatus.waitingForLogin);
-      case 'moved':
-        break; // 検索画面に移るので、読み込み終わったら入力する
+      case 'moved' || 'superseded':
+        break; // 検索画面に移るので、読み込み次第入力する
       case 'failed':
         _pendingSearch = null;
         _setSearchStatus(InstagramSearchStatus.failed);
       default:
         // 入力中にページが移ったときなど。次にページを読み込んだときにもう一度試す
-        _setSearchStatus(InstagramSearchStatus.failed);
+        if (progress >= 1) _setSearchStatus(InstagramSearchStatus.failed);
     }
   }
 
-  /// 検索欄に [query] を入れる。検索欄がなければ、PC 向けの表示ではサイドバーの「検索」を押し、
-  /// それでも出なければ検索画面に移る（'moved'）。ログインしていなければ 'login' を返す。
-  /// Instagram の入力欄（React）はキー入力と同じイベントでないと値の変化に気づかないので、insertText で入力する。
+  /// 検索欄に [query] を高速で入れる。
+  /// - すでに検索欄が表示されていれば 0ms で書き換えて React の検索イベントを発火させる
+  /// - PC 表示でドロワーが閉じていれば待ち時間なしでサイドバーの「検索」を押して開く
+  /// - スマホ表示で別ページを見ていればすぐに検索画面へ遷移する
   static const _searchScript = r'''
+window.__nearbySearchSeq = seq;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const visible = (el) => el.getClientRects().length > 0;
+const visible = (el) => {
+  if (!el) return false;
+  const r = el.getBoundingClientRect();
+  return r.width > 0 && r.height > 0;
+};
 const findInput = () => [...document.querySelectorAll('input')].find((input) =>
-  (input.type === 'text' || input.type === 'search') && visible(input) &&
-  /検索|search/i.test((input.getAttribute('aria-label') || '') + ' ' + (input.placeholder || '')));
+  (input.type === 'text' || input.type === 'search' || !input.type) && visible(input) &&
+  /検索|search/i.test(
+    (input.getAttribute('aria-label') || '') + ' ' +
+    (input.placeholder || '') + ' ' +
+    (input.getAttribute('name') || '')
+  ));
+const fill = (input) => {
+  input.focus();
+  if (input.value === query) {
+    input.dispatchEvent(new Event('focus', { bubbles: true }));
+    return true;
+  }
+  const prev = input.value;
+  try { input.setSelectionRange(0, prev.length); } catch (_) { input.select(); }
+  let ok = false;
+  try {
+    ok = document.execCommand('insertText', false, query) && input.value === query;
+  } catch (_) {}
+  if (!ok) {
+    const tracker = input._valueTracker;
+    if (tracker) tracker.setValue(prev);
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    setValue.call(input, query);
+    input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: query }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  return input.value === query;
+};
+
 let clicked = false;
-for (let i = 0; i < 60; i++) {
+const onSearchPath = location.pathname.startsWith('/explore/search');
+for (let i = 0; i < 160; i++) {
+  if (window.__nearbySearchSeq !== seq) return 'superseded';
   if ([...document.querySelectorAll('input[type="password"]')].some(visible)) return 'login';
   const input = findInput();
-  if (input) {
-    input.focus();
-    input.select();
-    if (!document.execCommand('insertText', false, query) || input.value !== query) {
-      const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-      setValue.call(input, query);
-      input.dispatchEvent(new Event('input', { bubbles: true }));
+  if (input) return fill(input) ? 'done' : 'failed';
+
+  if (!clicked && (!onSearchPath || i >= 3)) {
+    const icons = [...document.querySelectorAll('svg[aria-label]')].filter((svg) =>
+      /^(検索|Search)$/.test(svg.getAttribute('aria-label') || ''));
+    for (const icon of icons) {
+      const button = icon.closest('a, [role="button"], [role="link"], button');
+      if (!button || !visible(button)) continue;
+      const href = button.getAttribute('href') || '';
+      if (!onSearchPath || !href || href === '#' || href.startsWith('/explore/search')) {
+        button.click();
+        clicked = true;
+        break;
+      }
     }
-    return input.value === query ? 'done' : 'failed';
   }
-  if (!clicked && i >= 8) {
-    const icon = [...document.querySelectorAll('svg[aria-label]')].find((svg) =>
-      /^(検索|Search)$/.test(svg.getAttribute('aria-label')));
-    const button = icon && icon.closest('a, [role="button"], [role="link"]');
-    if (button) {
-      button.click();
+  if (!onSearchPath && !clicked && document.readyState !== 'loading' && i >= 2) {
+    const searchLink = document.querySelector('a[href^="/explore/search"]');
+    if (searchLink && visible(searchLink)) {
+      searchLink.click();
       clicked = true;
+    } else {
+      setTimeout(() => location.assign('/explore/search/'), 10);
+      return 'moved';
     }
   }
-  if (i === 20 && !location.pathname.startsWith('/explore/search')) {
-    setTimeout(() => location.assign('/explore/search/'), 300);
+  if (i === 40 && !location.pathname.startsWith('/explore/search')) {
+    setTimeout(() => location.assign('/explore/search/'), 10);
     return 'moved';
   }
-  await sleep(250);
+  await sleep(50);
 }
 return 'failed';
 ''';
@@ -412,7 +483,13 @@ class _WebView extends StatelessWidget {
         return NavigationActionPolicy.CANCEL;
       },
       onLoadStart: (web, url) => c._update(url: url?.toString()),
-      onProgressChanged: (web, progress) => c._update(progress: progress / 100),
+      onProgressChanged: (web, progress) {
+        c._update(progress: progress / 100);
+        // 画像などの読み込み完了（onLoadStop）を待たず、DOM が出始めた段階で検索入力を開始する
+        if (progress >= 45 && c._pendingSearch != null) {
+          c._runPendingSearch();
+        }
+      },
       onTitleChanged: (web, title) => c._update(title: title),
       onUpdateVisitedHistory: (web, url, isReload) {
         c.url = url?.toString();

@@ -17,6 +17,7 @@ class SidePanel extends StatelessWidget {
     required this.onAddListing,
     required this.onOpenLink,
     required this.onSearchInstagram,
+    required this.onToggleHidden,
   });
 
   final NearbyController controller;
@@ -25,6 +26,7 @@ class SidePanel extends StatelessWidget {
   final VoidCallback onAddListing;
   final OpenLink onOpenLink;
   final ValueChanged<String> onSearchInstagram;
+  final void Function(Place place, bool hidden) onToggleHidden;
 
   @override
   Widget build(BuildContext context) {
@@ -78,7 +80,7 @@ class SidePanel extends StatelessWidget {
                         decoration: const InputDecoration(
                           isDense: true,
                           prefixIcon: Icon(Icons.search),
-                          hintText: '名前・ユーザー名・種別で絞り込み',
+                          hintText: '名前・ユーザー名・開催地・種別で絞り込み',
                           border: OutlineInputBorder(),
                         ),
                         onChanged: c.setFilter,
@@ -98,17 +100,29 @@ class SidePanel extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text('${places.length} 件', style: text.labelLarge),
-                      for (final s in [if (c.searching) c.status ?? '検索中…', ?c.snsStatus])
+                      for (final s in [
+                        if (c.searching) c.status ?? '検索中…',
+                        ?c.eventStatus,
+                        ?c.snsStatus,
+                      ])
                         Text(s, style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant), maxLines: 2),
                     ],
                   ),
                 ),
-                if (c.busy || c.snsStatus != null)
+                if (c.busy || c.snsStatus != null || c.eventStatus != null)
                   const Padding(
                     padding: EdgeInsets.only(right: 8),
                     child: SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
                   ),
+                if (c.hiddenPlaces.isNotEmpty)
+                  TextButton.icon(
+                    style: TextButton.styleFrom(visualDensity: VisualDensity.compact),
+                    onPressed: () => showHiddenPlacesSheet(context, c),
+                    icon: const Icon(Icons.visibility_off_outlined, size: 16),
+                    label: Text('非表示 ${c.hiddenPlaces.length}'),
+                  ),
                 TextButton.icon(
+                  style: TextButton.styleFrom(visualDensity: VisualDensity.compact),
                   onPressed: onAddListing,
                   icon: const Icon(Icons.add_location_alt_outlined, size: 18),
                   label: const Text('募集を登録'),
@@ -122,7 +136,7 @@ class SidePanel extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.all(10),
             child: Text(
-              'データ: © OpenStreetMap contributors・Wikidata・各施設の公式サイト ／ 「登録した募集」はこの端末に保存',
+              'データ: © OpenStreetMap contributors・Wikidata・各公式サイト・イベントサイト ／ 登録・非表示はこの端末に保存',
               style: text.labelSmall?.copyWith(color: scheme.onSurfaceVariant),
               textAlign: TextAlign.center,
             ),
@@ -143,7 +157,7 @@ class SidePanel extends StatelessWidget {
         action: TextButton(onPressed: c.search, child: const Text('再試行')),
       );
     }
-    if (places.isEmpty && !c.busy) {
+    if (places.isEmpty && !c.busy && c.eventStatus == null) {
       return _Message(
         icon: Icons.search_off,
         color: scheme.onSurfaceVariant,
@@ -161,6 +175,9 @@ class SidePanel extends StatelessWidget {
         category: places[i].primaryCategory(c.enabled),
         selected: places[i].id == c.selectedId,
         platforms: c.platforms,
+        isHidden: c.isHidden(places[i].id),
+        onToggleHidden: (hidden) => onToggleHidden(places[i], hidden),
+        onSearchInstagram: onSearchInstagram,
         onTap: () => onSelect(places[i]),
         onOpenLink: onOpenLink,
       ),

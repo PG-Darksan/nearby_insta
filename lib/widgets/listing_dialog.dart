@@ -4,7 +4,7 @@ import 'package:latlong2/latlong.dart';
 import '../models/listing.dart';
 import '../models/place.dart';
 
-/// 募集情報（ボランティア募集・有償体験）を登録・編集するダイアログ。
+/// 募集情報（ボランティア募集・婚活/合コン・有償体験）を登録・編集するダイアログ。
 /// 保存すると [UserListing] を返す。
 Future<UserListing?> showListingDialog(BuildContext context, {required LatLng position, UserListing? initial}) {
   return showDialog<UserListing>(
@@ -44,6 +44,8 @@ class _ListingDialogState extends State<_ListingDialog> {
 
   String? _value(TextEditingController c) => c.text.trim().isEmpty ? null : c.text.trim();
 
+  bool get _hasFee => _category == PlaceCategory.experience || _category == PlaceCategory.matchmaking;
+
   void _submit() {
     if (!_form.currentState!.validate()) return;
     final initial = widget.initial;
@@ -57,7 +59,7 @@ class _ListingDialogState extends State<_ListingDialog> {
         createdAt: initial?.createdAt ?? DateTime.now(),
         organizer: _value(_organizer),
         description: _value(_description),
-        fee: _category == PlaceCategory.experience ? _value(_fee) : null,
+        fee: _hasFee ? _value(_fee) : null,
         schedule: _value(_schedule),
         url: _value(_url),
         contact: _value(_contact),
@@ -67,11 +69,15 @@ class _ListingDialogState extends State<_ListingDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final isExperience = _category == PlaceCategory.experience;
+    final hintTitle = switch (_category) {
+      PlaceCategory.volunteer => '例: 公園の清掃ボランティア',
+      PlaceCategory.matchmaking => '例: 20代・30代 カフェ合コン・街コン',
+      _ => '例: 陶芸体験（初心者歓迎）',
+    };
     return AlertDialog(
       title: Text(widget.initial == null ? '募集情報を登録' : '募集情報を編集'),
       content: SizedBox(
-        width: 460,
+        width: 480,
         child: Form(
           key: _form,
           child: SingleChildScrollView(
@@ -80,12 +86,17 @@ class _ListingDialogState extends State<_ListingDialog> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 SegmentedButton<PlaceCategory>(
+                  showSelectedIcon: false,
                   segments: [
-                    for (final c in [PlaceCategory.volunteer, PlaceCategory.experience])
+                    for (final c in [PlaceCategory.volunteer, PlaceCategory.matchmaking, PlaceCategory.experience])
                       ButtonSegment(
                         value: c,
-                        icon: Icon(c.icon),
-                        label: Text(c == PlaceCategory.volunteer ? 'ボランティア募集' : '有償体験'),
+                        icon: Icon(c.icon, size: 18),
+                        label: Text(switch (c) {
+                          PlaceCategory.volunteer => 'ボランティア',
+                          PlaceCategory.matchmaking => '婚活・合コン',
+                          _ => '有償体験',
+                        }),
                       ),
                   ],
                   selected: {_category},
@@ -97,13 +108,13 @@ class _ListingDialogState extends State<_ListingDialog> {
                   autofocus: true,
                   decoration: InputDecoration(
                     labelText: 'タイトル *',
-                    hintText: isExperience ? '例: 陶芸体験（初心者歓迎）' : '例: 公園の清掃ボランティア',
+                    hintText: hintTitle,
                   ),
                   validator: (v) => (v == null || v.trim().isEmpty) ? 'タイトルを入力してください' : null,
                 ),
                 TextFormField(
                   controller: _organizer,
-                  decoration: const InputDecoration(labelText: '主催・団体名'),
+                  decoration: const InputDecoration(labelText: '主催・団体名・会場名'),
                 ),
                 TextFormField(
                   controller: _description,
@@ -111,10 +122,13 @@ class _ListingDialogState extends State<_ListingDialog> {
                   minLines: 2,
                   maxLines: 5,
                 ),
-                if (isExperience)
+                if (_hasFee)
                   TextFormField(
                     controller: _fee,
-                    decoration: const InputDecoration(labelText: '料金', hintText: '例: 3,000円'),
+                    decoration: InputDecoration(
+                      labelText: '料金・参加費',
+                      hintText: _category == PlaceCategory.matchmaking ? '例: 男性 5,000円 / 女性 1,000円' : '例: 3,000円',
+                    ),
                   ),
                 TextFormField(
                   controller: _schedule,
@@ -137,8 +151,8 @@ class _ListingDialogState extends State<_ListingDialog> {
                 ),
                 const SizedBox(height: 12),
                 Text(
-                  '位置: ${widget.position.latitude.toStringAsFixed(5)}, ${widget.position.longitude.toStringAsFixed(5)}'
-                  '\n登録した情報はこの端末の中だけに保存されます。',
+                  '開催地の位置: ${widget.position.latitude.toStringAsFixed(5)}, ${widget.position.longitude.toStringAsFixed(5)}'
+                  '\n指定した地点が開催地として地図に表示されます（この端末の中だけに保存されます）。',
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
               ],

@@ -2,7 +2,7 @@
 """OSM の抽出データから、アプリがすぐに読み込める「近くのスポット」タイルを作る。
 
 1. OSM（Geofabrik の .osm.pbf）から、SNS アカウントのタグがある場所・高校・専門学校・大学・
-   通信制の学校・ボランティア/体験施設・飲食店・美容室・史跡や名所・会社・Web サイトのあるお店や施設を取り出す
+   通信制の学校・体験施設・飲食店・美容室・史跡や名所・会社・Web サイトのあるお店や施設を取り出す
 2. Wikidata と各施設の公式サイトに載っている SNS アカウントを探す
    （結果は --cache に保存し、次回は期限切れのものだけ確認し直す）
 3. 0.1 度ごとのタイル（JSON）と meta.json を --out に書き出す
@@ -74,7 +74,6 @@ CRAM = re.compile(r'塾|ゼミナール|教室|個別指導|予備校|進学|学
 # 校舎・設備など、学校そのものではない建物
 SCHOOL_PART = re.compile(r'号館|棟|グラウンド|グランド|運動場|駐車場|駐輪場|寮|図書|体育館|AED|交番|センター前')
 EDU_AMENITY = {'school', 'college', 'university', 'training', 'prep_school', 'language_school', 'music_school'}
-VOLUNTEER = re.compile(r'ボランティア|社会福祉協議会|市民活動|NPOセンター|volunteer', re.I)
 EXPERIENCE = re.compile(r'体験|ワークショップ|workshop|陶芸', re.I)
 # 史跡・名所: 城跡・遺跡・古墳・歴史的建造物など（記念碑・祠・道標などは Wikidata にあるものだけ）、文化財、
 # Wikidata にある寺社・観光地
@@ -146,8 +145,6 @@ def classify(tags: dict, name: str) -> set[str]:
         cats.add('university')
     if correspondence:
         cats.add('correspondence')
-    if VOLUNTEER.search(name):
-        cats.add('volunteer')
     if EXPERIENCE.search(name) or tags.get('craft') in ('pottery', 'glassblower'):
         cats.add('experience')
     if amenity in FOOD_AMENITY or shop in FOOD_SHOP:
@@ -167,7 +164,7 @@ def classify(tags: dict, name: str) -> set[str]:
 
 
 # 学校などの施設。同じ大学のキャンパス違いのように、同じサイトを共有していても公式サイトを確認する
-INSTITUTION = {'highSchool', 'vocational', 'university', 'correspondence', 'volunteer', 'experience'}
+INSTITUTION = {'highSchool', 'vocational', 'university', 'correspondence', 'experience'}
 
 
 def normalize_url(raw: str) -> str | None:

@@ -9,7 +9,8 @@ export 'social.dart';
 /// 地図に表示する場所の種類。並び順がマーカーの色を決めるときの優先順位になる。
 /// 飲食店・美容室は SNS より後にして、アカウントのあるお店は SNS のアイコンで表示する。
 enum PlaceCategory {
-  volunteer('ボランティア', Icons.volunteer_activism_outlined, Color(0xFF2E7D32), institution: true),
+  volunteer('ボランティア', Icons.volunteer_activism_outlined, Color(0xFF2E7D32)),
+  matchmaking('婚活・合コン', Icons.favorite_border, Color(0xFFE91E63)),
   experience('有償体験', Icons.palette_outlined, Color(0xFFEF6C00), institution: true),
   highSchool('高校', Icons.school_outlined, Color(0xFF1E88E5), institution: true),
   vocational('専門学校', Icons.design_services_outlined, Color(0xFF00897B), institution: true),
@@ -46,7 +47,51 @@ enum Audience {
   final Color color;
 }
 
-/// OSM 上の場所、またはユーザーが登録した募集情報。
+/// イベント情報サイト（こくちーずプロ・街コンジャパン・オミカレ・activo）から取得した集まり・ボランティアの開催情報。
+class EventInfo {
+  const EventInfo({
+    required this.source,
+    this.venue,
+    this.schedule,
+    this.fee,
+    this.organizer,
+    this.description,
+  });
+
+  /// 取得元のサイト名。
+  final String source;
+
+  /// 開催地・会場名（団体の事務所ではなく実際の開催場所）。
+  final String? venue;
+
+  /// 開催日時。
+  final String? schedule;
+
+  /// 参加費・料金。
+  final String? fee;
+  final String? organizer;
+  final String? description;
+
+  Map<String, dynamic> toJson() => {
+        'source': source,
+        'venue': venue,
+        'schedule': schedule,
+        'fee': fee,
+        'organizer': organizer,
+        'description': description,
+      };
+
+  factory EventInfo.fromJson(Map<String, dynamic> json) => EventInfo(
+        source: json['source'] as String,
+        venue: json['venue'] as String?,
+        schedule: json['schedule'] as String?,
+        fee: json['fee'] as String?,
+        organizer: json['organizer'] as String?,
+        description: json['description'] as String?,
+      );
+}
+
+/// OSM 上の場所、公開イベントの開催地、またはユーザーが登録した募集情報。
 class Place {
   Place({
     required this.id,
@@ -59,12 +104,13 @@ class Place {
     this.website,
     this.wikidata,
     this.listing,
+    this.event,
     this.precomputed = false,
     this.audience = Audience.none,
   })  : _baseCategories = categories,
         links = links ?? [];
 
-  /// OSM なら `node/123`、登録した募集なら `listing/<id>`。
+  /// OSM なら `node/123`、公開イベントなら `event/<id>`、登録した募集なら `listing/<id>`。
   final String id;
   final String name;
   final LatLng position;
@@ -82,6 +128,9 @@ class Place {
   /// ユーザーが登録した募集情報の場合のみ。
   final UserListing? listing;
 
+  /// イベント情報サイトから取得した集まり・ボランティアの開催地情報の場合のみ。
+  final EventInfo? event;
+
   /// 配信データで Wikidata・公式サイトの確認まで済んでいるもの（アプリで調べ直さない）。
   final bool precomputed;
 
@@ -97,7 +146,12 @@ class Place {
 
   bool get isListing => listing != null;
 
-  String? get osmUrl => isListing ? null : 'https://www.openstreetmap.org/$id';
+  bool get isEvent => event != null;
+
+  /// 募集やイベントの開催地（角丸の四角マーカーで常設施設と区別する）。
+  bool get isGathering => isListing || isEvent;
+
+  String? get osmUrl => isListing || isEvent ? null : 'https://www.openstreetmap.org/$id';
 
   /// 学校などの施設か。全国データの範囲外では公式サイトを調べる対象になる。
   bool get isInstitution => _baseCategories.any((c) => c.institution);
@@ -136,9 +190,19 @@ class Place {
   bool matches(String query) {
     final q = query.trim().toLowerCase();
     if (q.isEmpty) return true;
-    return [name, kind, address, ...links.map((l) => l.username), listing?.organizer, listing?.description]
-        .whereType<String>()
-        .any((s) => s.toLowerCase().contains(q));
+    return [
+      name,
+      kind,
+      address,
+      ...links.map((l) => l.username),
+      listing?.organizer,
+      listing?.description,
+      event?.venue,
+      event?.organizer,
+      event?.description,
+      event?.schedule,
+      event?.source,
+    ].whereType<String>().any((s) => s.toLowerCase().contains(q));
   }
 
   /// Overpass API（または配信データ）の要素 1 件から生成する。どのカテゴリにも当てはまらなければ null。
@@ -183,8 +247,11 @@ class Place {
     return name;
   }
 
-  /// SNS で検索するときの言葉（括弧を空白にする）。
-  String get searchQuery => name.replaceAll(RegExp(r'[（）()]'), ' ').replaceAll(RegExp(r'\s+'), ' ').trim();
+  /// SNS で検索するときの言葉（括弧を空白にする。イベントは主催者や会場名を優先する）。
+  String get searchQuery {
+    final base = event != null ? (event!.organizer ?? event!.venue ?? name) : name;
+    return base.replaceAll(RegExp(r'[（）()【】《》「」『』]'), ' ').replaceAll(RegExp(r'\s+'), ' ').trim();
+  }
 
   /// Overpass の要素の座標（way / relation は中心点）。
   static LatLng? positionOf(Map<String, dynamic> element) {
@@ -219,6 +286,7 @@ final _converted = Expando<Object>('place');
 Object _placeOf(Map<String, dynamic> element) => _converted[element] ??= Place.fromOsm(element) ?? false;
 
 // カテゴリの判定（tool/build_data.py の classify と同じ規則）
+// ボランティアは社協・センターなどの施設（事務所）ではなく実際の開催地をイベント情報から出すため、OSM の施設は含めない。
 final _highSchoolName = RegExp(r'高等学校|高校|中等教育学校|high school', caseSensitive: false);
 final _vocationalName = RegExp(r'専門学校|専修学校|職業能力開発|ポリテクセンター|ポリテクカレッジ|職業訓練');
 final _correspondenceName = RegExp(
@@ -233,7 +301,6 @@ final _cram = RegExp(r'塾|ゼミナール|教室|個別指導|予備校|進学|
 // 校舎・設備など、学校そのものではない建物
 final _schoolPart = RegExp(r'号館|棟|グラウンド|グランド|運動場|駐車場|駐輪場|寮|図書|体育館|AED|交番|センター前');
 const _eduAmenities = {'school', 'college', 'university', 'training', 'prep_school', 'language_school', 'music_school'};
-final _volunteerName = RegExp(r'ボランティア|社会福祉協議会|市民活動|NPOセンター|volunteer', caseSensitive: false);
 final _experienceName = RegExp(r'体験|ワークショップ|workshop|陶芸', caseSensitive: false);
 const _experienceCrafts = {'pottery', 'glassblower'};
 // 史跡・名所: 城跡・遺跡・古墳・歴史的建造物など（記念碑・祠・道標などは Wikidata にあるものだけ）、文化財、
@@ -274,7 +341,6 @@ Set<PlaceCategory> classify(Map<String, dynamic> tags, String name) {
     if (amenity == 'university' || (amenity == 'college' && name.contains('大学')))
       PlaceCategory.university,
     if (correspondence) PlaceCategory.correspondence,
-    if (_volunteerName.hasMatch(name)) PlaceCategory.volunteer,
     if (_experienceName.hasMatch(name) || _experienceCrafts.contains(tags['craft']))
       PlaceCategory.experience,
     if (_foodAmenities.contains(amenity) || _foodShops.contains(shop)) PlaceCategory.restaurant,

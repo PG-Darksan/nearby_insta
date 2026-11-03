@@ -21,7 +21,7 @@ Future<void> openExternal(String url) {
   return launchUrl(uri, mode: LaunchMode.externalApplication);
 }
 
-/// 地図のマーカー。登録した募集は角丸の四角、OSM の場所は丸で描く。SNS は種類ごとのアイコン。
+/// 地図のマーカー。集まり・募集の開催地は角丸の四角、常設の場所は丸で描く。SNS は種類ごとのアイコン。
 class PlaceMarker extends StatelessWidget {
   const PlaceMarker({
     super.key,
@@ -47,8 +47,8 @@ class PlaceMarker extends StatelessWidget {
       height: size,
       alignment: Alignment.center,
       decoration: BoxDecoration(
-        shape: place.isListing ? BoxShape.rectangle : BoxShape.circle,
-        borderRadius: place.isListing ? BorderRadius.circular(size * 0.28) : null,
+        shape: place.isGathering ? BoxShape.rectangle : BoxShape.circle,
+        borderRadius: place.isGathering ? BorderRadius.circular(size * 0.28) : null,
         color: isInstagram ? null : (platform?.color ?? category.color),
         gradient: isInstagram ? instagramGradient : null,
         border: Border.all(color: Colors.white, width: selected ? 3 : 2),
@@ -80,8 +80,8 @@ class PlaceAvatar extends StatelessWidget {
       alignment: Alignment.center,
       decoration: BoxDecoration(
         color: color.withValues(alpha: 0.10),
-        shape: place.isListing ? BoxShape.rectangle : BoxShape.circle,
-        borderRadius: place.isListing ? BorderRadius.circular(size * 0.28) : null,
+        shape: place.isGathering ? BoxShape.rectangle : BoxShape.circle,
+        borderRadius: place.isGathering ? BorderRadius.circular(size * 0.28) : null,
         border: Border.all(color: color, width: 2),
       ),
       child: platform != null
@@ -103,6 +103,7 @@ class CategoryBadges extends StatelessWidget {
       runSpacing: 4,
       children: [
         if (place.isListing) const _Badge(label: '登録した募集', color: Color(0xFF616161)),
+        if (place.event case final ev?) _Badge(label: ev.source, color: const Color(0xFF455A64)),
         for (final c in PlaceCategory.values)
           if (place.categories.contains(c)) _Badge(label: c.label, color: c.color),
         if (place.audience != Audience.none) _Badge(label: place.audience.label, color: place.audience.color),
@@ -139,6 +140,9 @@ class PlaceTile extends StatelessWidget {
     required this.onTap,
     required this.onOpenLink,
     this.platforms,
+    this.isHidden = false,
+    this.onToggleHidden,
+    this.onSearchInstagram,
   });
 
   static const height = 76.0;
@@ -149,16 +153,28 @@ class PlaceTile extends StatelessWidget {
   final VoidCallback onTap;
   final OpenLink onOpenLink;
   final Set<SnsPlatform>? platforms;
+  final bool isHidden;
+  final ValueChanged<bool>? onToggleHidden;
+  final ValueChanged<String>? onSearchInstagram;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final text = Theme.of(context).textTheme;
     final listing = place.listing;
+    final event = place.event;
     final link = place.primaryLink(platforms);
     final (String? subtitle, Color? subtitleColor) = switch (place) {
       _ when listing != null => (
           [listing.organizer, listing.fee, listing.schedule].whereType<String>().join(' · '),
+          null
+        ),
+      _ when event != null => (
+          [
+            if (event.venue case final v?) '開催地: $v' else if (place.address case final a?) '開催地: $a',
+            event.schedule,
+            event.fee,
+          ].whereType<String>().join(' · '),
           null
         ),
       _ when link != null => (
@@ -167,21 +183,32 @@ class PlaceTile extends StatelessWidget {
         ),
       _ => (place.address, null),
     };
-    // 種類ごとに 1 つずつ、最大 3 つのボタンを並べる
+    // 種類ごとに 1 つずつ、最大 2〜3 つのボタンを並べる
     final buttons = <SocialLink>[];
     for (final l in place.sortedLinks) {
-      if (buttons.length < 3 && !buttons.any((b) => b.platform == l.platform)) buttons.add(l);
+      if (buttons.length < 2 && !buttons.any((b) => b.platform == l.platform)) buttons.add(l);
     }
+    final hasInstagram = place.links.any((l) => l.platform == SnsPlatform.instagram);
     return Material(
       color: selected ? scheme.primaryContainer.withValues(alpha: 0.6) : Colors.transparent,
       child: InkWell(
         onTap: onTap,
         child: Padding(
-          padding: const EdgeInsets.only(left: 16, right: 8),
+          padding: EdgeInsets.only(left: onToggleHidden != null ? 4 : 16, right: 6),
           child: Row(
             children: [
-              PlaceAvatar(place: place, category: category, platforms: platforms),
-              const SizedBox(width: 12),
+              if (onToggleHidden case final toggle?)
+                Tooltip(
+                  message: isHidden ? 'チェックを外して地図に再表示' : 'チェックを付けて地図から非表示',
+                  child: Checkbox(
+                    value: isHidden,
+                    visualDensity: VisualDensity.compact,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    onChanged: (v) => toggle(v ?? false),
+                  ),
+                ),
+              PlaceAvatar(place: place, category: category, size: 42, platforms: platforms),
+              const SizedBox(width: 10),
               Expanded(
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
@@ -215,6 +242,13 @@ class PlaceTile extends StatelessWidget {
                   visualDensity: VisualDensity.compact,
                   icon: FaIcon(b.platform.icon, size: 18, color: b.platform.color),
                   onPressed: () => onOpenLink(b.url),
+                ),
+              if (!hasInstagram && !place.isListing && onSearchInstagram != null)
+                IconButton(
+                  tooltip: 'Instagram で「${place.searchQuery}」を検索',
+                  visualDensity: VisualDensity.compact,
+                  icon: Icon(Icons.person_search_outlined, size: 20, color: SnsPlatform.instagram.color),
+                  onPressed: () => onSearchInstagram!(place.searchQuery),
                 ),
             ],
           ),
@@ -265,6 +299,8 @@ class PlaceDetailCard extends StatelessWidget {
     required this.onOpenLink,
     this.platforms,
     this.onSearchInstagram,
+    this.isHidden = false,
+    this.onToggleHidden,
     this.onEdit,
     this.onDelete,
   });
@@ -277,6 +313,8 @@ class PlaceDetailCard extends StatelessWidget {
 
   /// Instagram でアカウントを検索する（引数は検索語）。
   final ValueChanged<String>? onSearchInstagram;
+  final bool isHidden;
+  final ValueChanged<bool>? onToggleHidden;
   final VoidCallback? onEdit;
   final VoidCallback? onDelete;
 
@@ -285,13 +323,17 @@ class PlaceDetailCard extends StatelessWidget {
     final text = Theme.of(context).textTheme;
     final scheme = Theme.of(context).colorScheme;
     final listing = place.listing;
+    final event = place.event;
     final link = place.primaryLink(platforms) ?? place.primaryLink();
+    final description = listing?.description ?? event?.description;
     final details = <(IconData, String)>[
-      if (listing?.organizer case final v?) (Icons.groups_outlined, v),
-      if (listing?.fee case final v?) (Icons.payments_outlined, v),
-      if (listing?.schedule case final v?) (Icons.event_outlined, v),
+      if (event?.venue case final v?) (Icons.location_on_outlined, '開催地: $v'),
+      if ((listing?.organizer ?? event?.organizer) case final v?) (Icons.groups_outlined, v),
+      if ((listing?.fee ?? event?.fee) case final v?) (Icons.payments_outlined, v),
+      if ((listing?.schedule ?? event?.schedule) case final v?) (Icons.event_outlined, v),
       if (listing?.contact case final v?) (Icons.mail_outline, v),
-      if (place.address case final v?) (Icons.place_outlined, v),
+      if (place.address case final v?)
+        (Icons.place_outlined, place.isGathering && event?.venue == null ? '開催地住所: $v' : v),
     ];
     return Card(
       elevation: 6,
@@ -316,10 +358,10 @@ class PlaceDetailCard extends StatelessWidget {
                     [?place.kind, '検索地点から ${formatDistance(place.distanceMeters)}'].join(' · '),
                     style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
                   ),
-                  if (listing?.description case final d? when d.isNotEmpty)
+                  if (description != null && description.isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.only(top: 6),
-                      child: Text(d, maxLines: 4, overflow: TextOverflow.ellipsis, style: text.bodyMedium),
+                      child: Text(description, maxLines: 4, overflow: TextOverflow.ellipsis, style: text.bodyMedium),
                     ),
                   for (final (icon, value) in details)
                     Padding(
@@ -347,11 +389,17 @@ class PlaceDetailCard extends StatelessWidget {
                           label: Text('${link.platform.label} で開く'),
                         ),
                       if (place.website case final url?)
-                        OutlinedButton.icon(
-                          onPressed: () => openExternal(url),
-                          icon: const Icon(Icons.language, size: 18),
-                          label: Text(listing != null ? '詳細ページ' : 'Web サイト'),
-                        ),
+                        place.isGathering && link == null
+                            ? FilledButton.icon(
+                                onPressed: () => openExternal(url),
+                                icon: const Icon(Icons.open_in_new, size: 18),
+                                label: const Text('詳細・申込ページ'),
+                              )
+                            : OutlinedButton.icon(
+                                onPressed: () => openExternal(url),
+                                icon: const Icon(Icons.language, size: 18),
+                                label: Text(place.isGathering ? '詳細ページ' : 'Web サイト'),
+                              ),
                       if (place.sortedLinks.any((l) => l.taggedPosts != null))
                         TaggedPostsButton(links: place.sortedLinks, onOpenLink: onOpenLink),
                       if (!place.isListing && onSearchInstagram != null)
@@ -359,6 +407,23 @@ class PlaceDetailCard extends StatelessWidget {
                           onPressed: () => onSearchInstagram!(place.searchQuery),
                           icon: FaIcon(SnsPlatform.instagram.icon, size: 16),
                           label: const Text('Instagram で探す'),
+                        ),
+                      if (onToggleHidden case final toggle?)
+                        FilterChip(
+                          selected: isHidden,
+                          showCheckmark: true,
+                          visualDensity: VisualDensity.compact,
+                          label: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (!isHidden) ...[
+                                const Icon(Icons.visibility_off_outlined, size: 16),
+                                const SizedBox(width: 4),
+                              ],
+                              Text(isHidden ? '非表示中' : '非表示にする'),
+                            ],
+                          ),
+                          onSelected: toggle,
                         ),
                       if (place.osmUrl case final url?)
                         TextButton.icon(

@@ -2,7 +2,7 @@ import 'package:latlong2/latlong.dart';
 
 import 'place.dart';
 
-/// ユーザーが地図上に登録した募集情報（ボランティア募集・有償体験）。
+/// ユーザーが地図上に登録した募集情報（ボランティア募集・婚活/合コン・有償体験）。
 class UserListing {
   UserListing({
     required this.id,
@@ -16,11 +16,15 @@ class UserListing {
     this.schedule,
     this.url,
     this.contact,
-  }) : assert(category == PlaceCategory.volunteer || category == PlaceCategory.experience);
+  }) : assert(
+         category == PlaceCategory.volunteer ||
+             category == PlaceCategory.matchmaking ||
+             category == PlaceCategory.experience,
+       );
 
   final String id;
 
-  /// [PlaceCategory.volunteer] または [PlaceCategory.experience]。
+  /// [PlaceCategory.volunteer]・[PlaceCategory.matchmaking]・[PlaceCategory.experience] のいずれか。
   final PlaceCategory category;
   final String title;
   final LatLng position;
@@ -28,7 +32,7 @@ class UserListing {
   final String? organizer;
   final String? description;
 
-  /// 料金（有償体験のみ）。例: "3,000円"
+  /// 料金（婚活・合コン、有償体験など）。例: "男性 5,000円 / 女性 1,000円"、"3,000円"
   final String? fee;
 
   /// 日時・期間。例: "毎週土曜 10:00〜12:00"
@@ -41,7 +45,11 @@ class UserListing {
         name: title,
         position: position,
         categories: {category},
-        kind: category == PlaceCategory.volunteer ? 'ボランティア募集' : '有償体験',
+        kind: switch (category) {
+          PlaceCategory.volunteer => 'ボランティア募集（開催地）',
+          PlaceCategory.matchmaking => '婚活・合コン',
+          _ => '有償体験',
+        },
         website: url,
         listing: this,
       );

@@ -3,6 +3,7 @@ import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 
 import '../controllers/nearby_controller.dart';
 import '../models/place.dart';
+import 'matchmaking_timeline.dart';
 import 'place_widgets.dart';
 
 /// メートル単位の半径を余分な末尾ゼロなしの km 数値文字列（例: 1000 -> "1", 1500 -> "1.5", 300 -> "0.3"）にする。
@@ -29,9 +30,10 @@ double? parseKmInput(String raw) {
 
 /// 検索範囲と、表示する種類・SNS・対象のチェック切り替え。地図の「絞り込み」画面で使う。
 class SearchFilters extends StatelessWidget {
-  const SearchFilters({super.key, required this.controller});
+  const SearchFilters({super.key, required this.controller, this.onSelectPlaceFromTimeline});
 
   final NearbyController controller;
+  final ValueChanged<Place>? onSelectPlaceFromTimeline;
 
   @override
   Widget build(BuildContext context) {
@@ -180,15 +182,39 @@ class SearchFilters extends StatelessWidget {
             ),
           ],
         ),
-        if (c.hiddenPlaces.isNotEmpty) ...[
-          const SizedBox(height: 8),
-          OutlinedButton.icon(
-            style: OutlinedButton.styleFrom(visualDensity: VisualDensity.compact),
-            onPressed: () => showHiddenPlacesSheet(context, c),
-            icon: const Icon(Icons.visibility_off_outlined, size: 16),
-            label: Text('チェックして非表示にした場所（${c.hiddenPlaces.length}件）'),
-          ),
-        ],
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 6,
+          children: [
+            OutlinedButton.icon(
+              style: OutlinedButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                foregroundColor: PlaceCategory.matchmaking.color,
+                side: BorderSide(color: PlaceCategory.matchmaking.color.withValues(alpha: 0.55)),
+              ),
+              onPressed: () {
+                final nav = Navigator.of(context);
+                final rootContext = nav.context;
+                nav.pop();
+                showMatchmakingTimelineSheet(
+                  rootContext,
+                  c,
+                  onSelectPlace: onSelectPlaceFromTimeline ?? (p) => c.select(p.id),
+                );
+              },
+              icon: const Icon(Icons.timeline, size: 16),
+              label: Text('婚活・合コンの日程タイムライン（${c.countOf(PlaceCategory.matchmaking)}件）'),
+            ),
+            if (c.hiddenPlaces.isNotEmpty)
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(visualDensity: VisualDensity.compact),
+                onPressed: () => showHiddenPlacesSheet(context, c),
+                icon: const Icon(Icons.visibility_off_outlined, size: 16),
+                label: Text('チェックして非表示にした場所（${c.hiddenPlaces.length}件）'),
+              ),
+          ],
+        ),
       ],
     );
   }
@@ -359,7 +385,11 @@ class _RadiusInputDialogState extends State<_RadiusInputDialog> {
 }
 
 /// 絞り込みの全項目を下から出す画面で開く。
-Future<void> showSearchFiltersSheet(BuildContext context, NearbyController controller) {
+Future<void> showSearchFiltersSheet(
+  BuildContext context,
+  NearbyController controller, {
+  ValueChanged<Place>? onSelectPlaceFromTimeline,
+}) {
   return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
@@ -369,7 +399,10 @@ Future<void> showSearchFiltersSheet(BuildContext context, NearbyController contr
       builder: (context, _) => SafeArea(
         child: SingleChildScrollView(
           padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-          child: SearchFilters(controller: controller),
+          child: SearchFilters(
+            controller: controller,
+            onSelectPlaceFromTimeline: onSelectPlaceFromTimeline,
+          ),
         ),
       ),
     ),
@@ -473,15 +506,17 @@ Future<void> showHiddenPlacesSheet(BuildContext context, NearbyController contro
 /// スマホの地図の上に出す、検索範囲と表示する種類のボタン。一覧のタブに移らずに、地図を見ながら変えられる。
 /// 種類は横にスクロールしてチェックを切り替え、SNS の種類や対象は「絞り込み」から変える。
 class MapFilterBar extends StatelessWidget {
-  const MapFilterBar({super.key, required this.controller});
+  const MapFilterBar({super.key, required this.controller, this.onSelectPlaceFromTimeline});
 
   final NearbyController controller;
+  final ValueChanged<Place>? onSelectPlaceFromTimeline;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final c = controller;
     final shadow = Colors.black.withValues(alpha: 0.3);
+    final matchmakingCount = c.countOf(PlaceCategory.matchmaking);
     return SizedBox(
       height: 40,
       child: ListView(
@@ -524,7 +559,27 @@ class MapFilterBar extends StatelessWidget {
             elevation: 2,
             shadowColor: shadow,
             visualDensity: VisualDensity.compact,
-            onPressed: () => showSearchFiltersSheet(context, c),
+            onPressed: () => showSearchFiltersSheet(
+              context,
+              c,
+              onSelectPlaceFromTimeline: onSelectPlaceFromTimeline,
+            ),
+          ),
+          const SizedBox(width: 6),
+          ActionChip(
+            tooltip: '周辺の婚活・合コンを開催日時順のタイムラインで見る',
+            avatar: Icon(Icons.timeline, size: 17, color: PlaceCategory.matchmaking.color),
+            label: Text(matchmakingCount > 0 ? '婚活日程 $matchmakingCount' : '婚活日程'),
+            backgroundColor: scheme.surface,
+            side: BorderSide(color: PlaceCategory.matchmaking.color.withValues(alpha: 0.55)),
+            elevation: 2,
+            shadowColor: shadow,
+            visualDensity: VisualDensity.compact,
+            onPressed: () => showMatchmakingTimelineSheet(
+              context,
+              c,
+              onSelectPlace: onSelectPlaceFromTimeline ?? (p) => c.select(p.id),
+            ),
           ),
           if (c.hiddenPlaces.isNotEmpty) ...[
             const SizedBox(width: 6),

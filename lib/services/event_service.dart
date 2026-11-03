@@ -90,6 +90,8 @@ class RawEventCandidate {
     this.address,
     this.coarseArea,
     this.schedule,
+    this.startAt,
+    this.endAt,
     this.fee,
     this.organizer,
     this.description,
@@ -104,16 +106,20 @@ class RawEventCandidate {
   final String? address;
   final String? coarseArea;
   final String? schedule;
+  final DateTime? startAt;
+  final DateTime? endAt;
   final String? fee;
   final String? organizer;
   final String? description;
 }
 
-/// 近くの「婚活・合コン（街コン・恋活を含む）」と「ボランティア（施設ではなく開催地）」を公開イベント情報から集める。
+/// 近くの「婚活・合コン（街コン・恋活を含む）」「ボランティア（施設ではなく開催地）」「有償体験（開催イベント）」を
+/// 公開イベント情報から集める。
 ///
-/// - こくちーずプロ: 一覧の JSON-LD に開催会場の緯度経度（GeoCoordinates）が含まれる
+/// - こくちーずプロ: 一覧の JSON-LD に開催会場の緯度経度（GeoCoordinates）が含まれる（婚活・ボランティア・有償体験）
 /// - 街コンジャパン / オミカレ: 都道府県一覧から近くのエリアのイベントを選び、詳細ページの会場住所を国土地理院 API で座標化する
 /// - activo: ボランティア募集の活動場所（`JobPosting.jobLocation`。団体所在地 `hiringOrganization` ではない）を座標化する
+/// - いこーよ: 都道府県別の有償ワークショップ・体験イベント一覧から開催会場住所を国土地理院 API で座標化する
 class EventService {
   EventService({http.Client? client, GeocodingService? geocoding})
       : _client = client ?? http.Client(),
@@ -141,6 +147,27 @@ class EventService {
   static final _volunteerMatch = RegExp(
     r'ボランティア|清掃|ごみ拾い|ゴミ拾い|クリーンアップ|ビーチクリーン|地域清掃|植樹|保護猫|保護犬|子ども食堂|こども食堂|'
     r'フードバンク|フードドライブ|チャリティ|災害支援|傾聴|手話.*支援|学習支援|募金',
+  );
+  static final _experienceTitleMatch = RegExp(
+    r'ワークショップ|workshop|体験(?:会|レッスン|教室|イベント|講座|クラス|コース|ワーク|ツアー|プログラム)?|'
+    r'手作り|ハンドメイド|クラフト|ものづくり|モノづくり|陶芸|ろくろ|金継ぎ|ガラス細工|ステンドグラス|切子|'
+    r'キャンドル|アロマ|調香|香水作り|ハーバリウム|フラワーアレンジ|リース作り|ブーケ作り|苔テラリウム|'
+    r'料理教室|パン作り|お菓子作り|スイーツ作り|和菓子作り|そば打ち|うどん打ち|味噌作り|ソーセージ作り|'
+    r'茶道|華道|生け花|書道|美文字|篆刻|着付け|染色|藍染|機織り|編み物|刺繍|つまみ細工|'
+    r'レザークラフト|革細工|木工|DIY|シルバーアクセサリー|アクセサリー作り|彫金|'
+    r'水彩|油絵|デッサン|アート体験|カリグラフィー|アルコールインク|'
+    r'ヨガ体験|ピラティス体験|ダンス体験|ボルダリング体験|SUP体験|カヤック体験|乗馬体験|農業体験|収穫体験',
+    caseSensitive: false,
+  );
+  static final _experienceExclude = RegExp(
+    r'出店者募集|出展者募集|スタッフ募集|講師募集|ボランティア募集|異業種交流|ビジネス交流|名刺交換|'
+    r'カフェ会.*友達|友達作り.*カフェ会|100人.*交流|朝活.*交流|転職|就職|会社説明会|個別相談会',
+  );
+  static final _freeEventExclude = RegExp(
+    r'参加無料|参加費無料|完全無料|無料体験|受講料無料|入場無料.*無料',
+  );
+  static final _textFeePattern = RegExp(
+    r'(?:参加費|料金|受講料|体験料|材料費|会費|費用)[：:\s・は税込]*([1-9][0-9,，]{2,6}\s*円(?:[〜~～][0-9,，]+\s*円)?)',
   );
 
   bool _loaded = false;
@@ -201,6 +228,7 @@ class EventService {
       _fromMachicon(pref, center, coarseLimitMeters, now, isCancelled: isCancelled),
       _fromOmikare(pref, center, coarseLimitMeters, now, isCancelled: isCancelled),
       _fromActivo(pref, center, coarseLimitMeters, isCancelled: isCancelled),
+      _fromIkoyo(pref, center, coarseLimitMeters, now, isCancelled: isCancelled),
     ]);
 
     if (isCancelled?.call() ?? false) return const [];
@@ -240,7 +268,7 @@ class EventService {
     bool Function()? isCancelled,
   }) async {
     final areaSeg = 'area-${Uri.encodeComponent(pref.name)}';
-    final urls = <String>[
+    final generalUrls = <String>[
       'https://www.kokuchpro.com/s/$areaSeg/q-${Uri.encodeComponent('婚活')}/',
       'https://www.kokuchpro.com/s/$areaSeg/q-${Uri.encodeComponent('街コン')}/',
       'https://www.kokuchpro.com/s/$areaSeg/q-${Uri.encodeComponent('合コン')}/',
@@ -249,14 +277,22 @@ class EventService {
       if (localArea != null && localArea.length >= 2 && !localArea.contains(' '))
         'https://www.kokuchpro.com/s/q-${Uri.encodeComponent(localArea)}/',
     ];
+    // et-0: オフライン（会場開催）のみ / charge-1: 有料イベントのみ
+    final paidExperienceUrls = <String>[
+      'https://www.kokuchpro.com/s/$areaSeg/et-0/charge-1/q-${Uri.encodeComponent('ワークショップ')}/',
+      'https://www.kokuchpro.com/s/$areaSeg/et-0/charge-1/q-${Uri.encodeComponent('体験')}/',
+    ];
 
-    final pages = await Future.wait(urls.map(_getHtml));
+    final allUrls = [...generalUrls, ...paidExperienceUrls];
+    final pages = await Future.wait(allUrls.map(_getHtml));
     if (isCancelled?.call() ?? false) return const [];
 
     final candidates = <String, RawEventCandidate>{};
-    for (final html in pages) {
+    for (var i = 0; i < pages.length; i++) {
+      final html = pages[i];
       if (html == null) continue;
-      for (final c in parseKokuchproHtml(html, now: now)) {
+      final isForcedPaid = i >= generalUrls.length;
+      for (final c in parseKokuchproHtml(html, now: now, forcedPaid: isForcedPaid)) {
         candidates.putIfAbsent(c.url, () => c);
       }
     }
@@ -273,8 +309,8 @@ class EventService {
     return out;
   }
 
-  /// こくちーずプロの検索結果 HTML から、オフライン開催の婚活・合コン・ボランティアを抽出する。
-  static List<RawEventCandidate> parseKokuchproHtml(String html, {DateTime? now}) {
+  /// こくちーずプロの検索結果 HTML から、オフライン開催の婚活・合コン・ボランティア・有償体験を抽出する。
+  static List<RawEventCandidate> parseKokuchproHtml(String html, {DateTime? now, bool forcedPaid = false}) {
     final cutoff = (now ?? DateTime.now()).subtract(const Duration(hours: 2));
     final out = <RawEventCandidate>[];
     for (final d in _extractLdEvents(html)) {
@@ -287,11 +323,24 @@ class EventService {
       final combined = '$title\n${desc ?? ''}';
       if (_businessExclude.hasMatch(title)) continue;
 
+      final offersFee = _extractOffersFee(d['offers']);
+      final textFee = _extractTextFee(combined);
       PlaceCategory? category;
+      String? effectiveFee = offersFee ?? textFee;
+
       if (_matchmakingMatch.hasMatch(combined)) {
         category = PlaceCategory.matchmaking;
       } else if (_volunteerMatch.hasMatch(combined)) {
         category = PlaceCategory.volunteer;
+      } else if (_isPaidExperienceCandidate(
+        title: title,
+        combined: combined,
+        offers: d['offers'],
+        textFee: textFee,
+        forcedPaid: forcedPaid,
+      )) {
+        category = PlaceCategory.experience;
+        effectiveFee ??= forcedPaid ? '有料（詳細は申込ページ）' : null;
       }
       if (category == null) continue;
 
@@ -311,6 +360,8 @@ class EventService {
       }
       if (pos == null && (address == null || address == '日本')) continue;
 
+      final startRaw = d['startDate'] as String?;
+      final endRaw = d['endDate'] as String?;
       out.add(RawEventCandidate(
         url: url,
         title: title,
@@ -319,13 +370,30 @@ class EventService {
         position: pos,
         venue: venue,
         address: address,
-        schedule: _formatSchedule(d['startDate'] as String?, d['endDate'] as String?),
-        fee: _extractOffersFee(d['offers']),
+        schedule: _formatSchedule(startRaw, endRaw),
+        startAt: _parseEventDateTime(startRaw),
+        endAt: _parseEventDateTime(endRaw),
+        fee: effectiveFee,
         organizer: _extractOrganizer(d['organizer']),
         description: desc,
       ));
     }
     return out;
+  }
+
+  static bool _isPaidExperienceCandidate({
+    required String title,
+    required String combined,
+    required Object? offers,
+    required String? textFee,
+    required bool forcedPaid,
+  }) {
+    if (_experienceExclude.hasMatch(combined)) return false;
+    if (!_experienceTitleMatch.hasMatch(title)) return false;
+    if (_freeEventExclude.hasMatch(title)) return false;
+    if (_isZeroOfferPrice(offers)) return false;
+    if (_hasPositiveOfferPrice(offers) || textFee != null) return true;
+    return forcedPaid && !_freeEventExclude.hasMatch(combined);
   }
 
   // ---------------- 2. 街コンジャパン ----------------
@@ -365,6 +433,8 @@ class EventService {
         final m = RegExp(r'[）)]\s*([^\s『「]{2,40}|『[^』]+』|「[^」]+」)で\d+月\d+日').firstMatch(desc);
         if (m != null) descVenue = m.group(1)!.replaceAll(RegExp(r'[『』「」]'), '').trim();
       }
+      final startRaw = d['startDate'] as String?;
+      final endRaw = d['endDate'] as String?;
       out.add(RawEventCandidate(
         url: url,
         title: title,
@@ -372,7 +442,9 @@ class EventService {
         source: '街コンジャパン',
         venue: descVenue,
         coarseArea: areaName,
-        schedule: _formatSchedule(d['startDate'] as String?, d['endDate'] as String?),
+        schedule: _formatSchedule(startRaw, endRaw),
+        startAt: _parseEventDateTime(startRaw),
+        endAt: _parseEventDateTime(endRaw),
         fee: _extractOffersFee(d['offers']),
         organizer: _extractOrganizer(d['organizer']),
         description: desc,
@@ -435,13 +507,17 @@ class EventService {
       final loc = d['location'];
       final areaName = loc is Map ? _cleanText(loc['name'] as String?) : null;
       final desc = _cleanText(d['description'] as String?);
+      final startRaw = d['startDate'] as String?;
+      final endRaw = d['endDate'] as String?;
       out.add(RawEventCandidate(
         url: url,
         title: title,
         category: PlaceCategory.matchmaking,
         source: 'オミカレ',
         coarseArea: areaName,
-        schedule: _formatSchedule(d['startDate'] as String?, d['endDate'] as String?),
+        schedule: _formatSchedule(startRaw, endRaw),
+        startAt: _parseEventDateTime(startRaw),
+        endAt: _parseEventDateTime(endRaw),
         fee: _extractOffersFee(d['offers']),
         organizer: _extractOrganizer(d['organizer']),
         description: desc,
@@ -570,6 +646,136 @@ class EventService {
     return (venue: null, address: null, fee: null);
   }
 
+  // ---------------- 5. いこーよ（有償ワークショップ・体験イベント） ----------------
+
+  Future<List<Place>> _fromIkoyo(
+    PrefectureInfo pref,
+    LatLng center,
+    int coarseLimitMeters,
+    DateTime now, {
+    bool Function()? isCancelled,
+  }) async {
+    final urls = <String>[
+      'https://iko-yo.net/events?prefecture_ids%5B%5D=${pref.code}&word=${Uri.encodeComponent('ワークショップ')}',
+      'https://iko-yo.net/events?prefecture_ids%5B%5D=${pref.code}&word=${Uri.encodeComponent('体験')}',
+    ];
+    final pages = await Future.wait(urls.map(_getHtml));
+    if (isCancelled?.call() ?? false) return const [];
+
+    final byUrl = <String, RawEventCandidate>{};
+    for (final html in pages) {
+      if (html == null) continue;
+      for (final c in parseIkoyoListHtml(html, now: now)) {
+        byUrl.putIfAbsent(c.url, () => c);
+      }
+    }
+    if (byUrl.isEmpty) return const [];
+
+    final nearby = await _filterNearbyCoarse(byUrl.values.toList(), pref, center, coarseLimitMeters);
+    final out = <Place>[];
+    for (final c in nearby.take(14)) {
+      if (isCancelled?.call() ?? false) return const [];
+      final addr = c.address;
+      if (addr == null || addr.length < 5) continue;
+      final pos = await _geocodeCached(addr);
+      if (pos == null) continue;
+      out.add(_candidateToPlace(c, pos));
+    }
+    return out;
+  }
+
+  /// いこーよの都道府県イベント一覧 HTML から、無料イベントを除いた有償の体験・ワークショップ開催イベントを抽出する。
+  static List<RawEventCandidate> parseIkoyoListHtml(String html, {DateTime? now}) {
+    final cutoff = (now ?? DateTime.now()).subtract(const Duration(hours: 2));
+
+    // 一覧カードから「タイトル -> イベント詳細 URL」と「完全無料ラベルの有無」を収集する
+    final urlByTitle = <String, String>{};
+    final freeTitles = <String>{};
+    final cardPattern = RegExp(r'<li[^>]*class="[^"]*p-index-list-item\b[\s\S]*?</li>', caseSensitive: false);
+    final linkHeadingPattern = RegExp(
+      r'href="(/events/\d+)"[\s\S]*?<h3[^>]*>([\s\S]*?)</h3>',
+      caseSensitive: false,
+    );
+    for (final cardMatch in cardPattern.allMatches(html)) {
+      final block = cardMatch.group(0)!;
+      final lh = linkHeadingPattern.firstMatch(block);
+      if (lh == null) continue;
+      final path = lh.group(1)!;
+      final heading = _cleanText(lh.group(2));
+      if (heading == null || heading.isEmpty) continue;
+      urlByTitle.putIfAbsent(heading, () => 'https://iko-yo.net$path');
+      if (block.contains('完全無料') || block.contains('参加無料')) {
+        freeTitles.add(heading);
+      }
+    }
+
+    final out = <RawEventCandidate>[];
+    final seenUrls = <String>{};
+    for (final d in _extractLdEvents(html)) {
+      final title = _cleanText(d['name'] as String?);
+      if (title == null || title.isEmpty) continue;
+      if (freeTitles.contains(title)) continue;
+      if (!_isUpcoming(d, cutoff) || _isOnlineOnly(d)) continue;
+      if (_businessExclude.hasMatch(title) || _experienceExclude.hasMatch(title)) continue;
+
+      final desc = _cleanText(d['description'] as String?);
+      final combined = '$title\n${desc ?? ''}';
+      if (_freeEventExclude.hasMatch(title) || _isZeroOfferPrice(d['offers'])) continue;
+      if (_matchmakingMatch.hasMatch(combined) || _volunteerMatch.hasMatch(combined)) continue;
+      if (!_experienceTitleMatch.hasMatch(combined)) continue;
+
+      final directUrl = (d['url'] as String?)?.trim();
+      final url = (directUrl != null && directUrl.isNotEmpty) ? directUrl : urlByTitle[title];
+      if (url == null || !seenUrls.add(url)) continue;
+
+      final loc = d['location'];
+      if (loc is! Map) continue;
+      final fullAddress = _extractPostalAddress(loc['address']);
+      if (fullAddress == null || fullAddress.length < 5 || fullAddress == '日本') continue;
+
+      // 「神奈川県大和市下鶴間2-5-40 つるカフェ食堂」のように番地の後ろに会場名が続く場合は分離してジオコーダ精度を高める
+      String geocodeAddr = fullAddress;
+      String? trailingVenue;
+      final splitMatch = RegExp(
+        r'^((?:北海道|東京都|(?:京都|大阪)府|.{2,3}県)?\S*[0-9０-９]+(?:[-ー−‐][0-9０-９]+)*(?:丁目|番地?|号)?)\s+(.+)$',
+      ).firstMatch(fullAddress);
+      if (splitMatch != null) {
+        geocodeAddr = splitMatch.group(1)!.trim();
+        trailingVenue = splitMatch.group(2)!.trim();
+      }
+
+      final rawLocName = _cleanText(loc['name'] as String?);
+      final venue = (rawLocName != null && rawLocName != title) ? rawLocName : trailingVenue;
+      if (venue == 'オンライン' || venue == 'Zoom') continue;
+
+      final cityMatch = RegExp(
+        r'^(?:北海道|東京都|(?:京都|大阪)府|.{2,3}県)?([^0-9０-９\s]+?[市区町村郡])',
+      ).firstMatch(geocodeAddr);
+      final coarseArea = cityMatch?.group(1);
+
+      final startRaw = d['startDate'] as String?;
+      final endRaw = d['endDate'] as String?;
+      final fee = _extractOffersFee(d['offers']) ?? _extractTextFee(combined) ?? '有料（詳細はイベントページ）';
+
+      out.add(RawEventCandidate(
+        url: url,
+        title: title,
+        category: PlaceCategory.experience,
+        source: 'いこーよ',
+        venue: venue,
+        address: geocodeAddr,
+        coarseArea: coarseArea,
+        schedule: _formatSchedule(startRaw, endRaw),
+        startAt: _parseEventDateTime(startRaw),
+        endAt: _parseEventDateTime(endRaw),
+        fee: fee,
+        organizer: _extractOrganizer(d['organizer']),
+        description: desc,
+      ));
+    }
+    return out;
+  }
+
   // ---------------- 詳細ページの解決・ジオコーディング・重複排除 ----------------
 
   /// 大まかなエリア名（例: 横浜駅周辺、小田原市）で検索地点から遠い候補を先に除外し、近い順にする。
@@ -625,6 +831,8 @@ class EventService {
           venue: detail.venue ?? c.venue ?? c.coarseArea,
           address: address,
           schedule: c.schedule,
+          startAt: c.startAt,
+          endAt: c.endAt,
           fee: c.fee ?? detail.fee,
           organizer: c.organizer,
           description: c.description,
@@ -671,9 +879,11 @@ class EventService {
 
   Place _candidateToPlace(RawEventCandidate c, LatLng pos) {
     final idHash = c.url.hashCode.toUnsigned(32).toRadixString(36);
-    final kind = c.category == PlaceCategory.volunteer
-        ? 'ボランティア（開催地）'
-        : _matchmakingKind(c.title, c.description);
+    final kind = switch (c.category) {
+      PlaceCategory.volunteer => 'ボランティア（開催地）',
+      PlaceCategory.experience => _experienceKind(c.title, c.description),
+      _ => _matchmakingKind(c.title, c.description),
+    };
     return Place(
       id: 'event/$idHash',
       name: c.title,
@@ -688,11 +898,33 @@ class EventService {
         source: c.source,
         venue: c.venue,
         schedule: c.schedule,
+        startAt: c.startAt,
+        endAt: c.endAt,
         fee: c.fee,
         organizer: c.organizer,
         description: c.description,
       ),
     );
+  }
+
+  static String _experienceKind(String title, String? description) {
+    final s = '$title ${description ?? ''}';
+    if (RegExp(r'陶芸|ろくろ|金継ぎ|ガラス細工|ステンドグラス|切子|彫金|レザークラフト|木工').hasMatch(s)) {
+      return '工芸・クラフト体験イベント';
+    }
+    if (RegExp(r'料理教室|パン作り|お菓子作り|スイーツ作り|和菓子|そば打ち|うどん打ち|味噌作り').hasMatch(s)) {
+      return '料理・食体験イベント';
+    }
+    if (RegExp(r'ヨガ|ピラティス|ダンス|ボルダリング|SUP|カヤック|乗馬').hasMatch(s)) {
+      return 'アクティビティ体験イベント';
+    }
+    if (RegExp(r'農業体験|収穫体験').hasMatch(s)) {
+      return '農業・自然体験イベント';
+    }
+    if (RegExp(r'ワークショップ|workshop', caseSensitive: false).hasMatch(title)) {
+      return '有償ワークショップ';
+    }
+    return '有償体験イベント';
   }
 
   static String _matchmakingKind(String title, String? description) {
@@ -806,8 +1038,23 @@ class EventService {
   static bool _isUpcoming(Map<String, dynamic> event, DateTime cutoff) {
     final raw = (event['endDate'] ?? event['startDate']) as String?;
     if (raw == null) return true;
-    final parsed = _parseIso(raw);
+    final trimmed = raw.trim();
+    if (RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(trimmed)) {
+      final day = DateTime.tryParse(trimmed);
+      if (day == null) return true;
+      return day.add(const Duration(days: 1)).isAfter(cutoff);
+    }
+    final parsed = _parseIso(trimmed);
     return parsed == null || parsed.isAfter(cutoff);
+  }
+
+  static DateTime? _parseEventDateTime(String? raw) {
+    if (raw == null || raw.trim().isEmpty) return null;
+    final trimmed = raw.trim();
+    if (RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(trimmed)) {
+      return DateTime.tryParse(trimmed);
+    }
+    return _parseIso(trimmed)?.toLocal();
   }
 
   static DateTime? _parseIso(String raw) {
@@ -818,18 +1065,21 @@ class EventService {
 
   static String? _formatSchedule(String? startRaw, String? endRaw) {
     if (startRaw == null) return null;
-    final start = _parseIso(startRaw)?.toLocal();
+    final dateOnlyStart = RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(startRaw.trim());
+    final start = _parseEventDateTime(startRaw);
     if (start == null) return null;
     const weekdays = ['月', '火', '水', '木', '金', '土', '日'];
     final wd = weekdays[start.weekday - 1];
     String hm(DateTime d) => '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
-    final base = '${start.month}/${start.day}($wd) ${hm(start)}';
-    final end = endRaw != null ? _parseIso(endRaw)?.toLocal() : null;
+    final base = dateOnlyStart ? '${start.month}/${start.day}($wd)' : '${start.month}/${start.day}($wd) ${hm(start)}';
+    final dateOnlyEnd = endRaw != null && RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(endRaw.trim());
+    final end = _parseEventDateTime(endRaw);
     if (end == null) return base;
     if (end.year == start.year && end.month == start.month && end.day == start.day) {
-      return '$base〜${hm(end)}';
+      return (dateOnlyStart || dateOnlyEnd) ? base : '$base〜${hm(end)}';
     }
-    return '$base〜${end.month}/${end.day}';
+    final endWd = weekdays[end.weekday - 1];
+    return '$base〜${end.month}/${end.day}($endWd)';
   }
 
   static String? _extractPostalAddress(Object? addr) {
@@ -863,6 +1113,35 @@ class EventService {
     if (org is String) return _cleanText(org);
     if (org is Map) return _cleanText(org['name'] as String?);
     return null;
+  }
+
+  static bool _hasPositiveOfferPrice(Object? offers) {
+    final list = offers is List ? offers : [?offers];
+    for (final o in list) {
+      if (o is! Map) continue;
+      final price = _toDouble(o['price']);
+      if (price != null && price > 0) return true;
+    }
+    return false;
+  }
+
+  static bool _isZeroOfferPrice(Object? offers) {
+    final list = offers is List ? offers : [?offers];
+    var sawZero = false;
+    for (final o in list) {
+      if (o is! Map) continue;
+      final price = _toDouble(o['price']);
+      if (price == null) continue;
+      if (price > 0) return false;
+      if (price == 0) sawZero = true;
+    }
+    return sawZero;
+  }
+
+  static String? _extractTextFee(String text) {
+    final m = _textFeePattern.firstMatch(text);
+    if (m == null) return null;
+    return m.group(1)!.replaceAll('，', ',').replaceAll(RegExp(r'\s+'), '');
   }
 
   static String? _extractOffersFee(Object? offers) {

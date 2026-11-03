@@ -11,7 +11,7 @@ export 'social.dart';
 enum PlaceCategory {
   volunteer('ボランティア', Icons.volunteer_activism_outlined, Color(0xFF2E7D32)),
   matchmaking('婚活・合コン', Icons.favorite_border, Color(0xFFE91E63)),
-  experience('有償体験', Icons.palette_outlined, Color(0xFFEF6C00), institution: true),
+  experience('有償体験', Icons.palette_outlined, Color(0xFFEF6C00)),
   highSchool('高校', Icons.school_outlined, Color(0xFF1E88E5), institution: true),
   vocational('専門学校', Icons.design_services_outlined, Color(0xFF00897B), institution: true),
   university('大学', Icons.account_balance_outlined, Color(0xFF5E35B1), institution: true),
@@ -47,12 +47,14 @@ enum Audience {
   final Color color;
 }
 
-/// イベント情報サイト（こくちーずプロ・街コンジャパン・オミカレ・activo）から取得した集まり・ボランティアの開催情報。
+/// イベント情報サイト（こくちーずプロ・街コンジャパン・オミカレ・activo・いこーよ）から取得した集まり・ボランティア・有償体験の開催情報。
 class EventInfo {
   const EventInfo({
     required this.source,
     this.venue,
     this.schedule,
+    this.startAt,
+    this.endAt,
     this.fee,
     this.organizer,
     this.description,
@@ -61,11 +63,17 @@ class EventInfo {
   /// 取得元のサイト名。
   final String source;
 
-  /// 開催地・会場名（団体の事務所ではなく実際の開催場所）。
+  /// 開催地・会場名（団体の事務所や常設店舗ではなく実際の開催場所）。
   final String? venue;
 
-  /// 開催日時。
+  /// 開催日時（表示用テキスト）。
   final String? schedule;
+
+  /// 開始日時（タイムライン並び替え・日付絞り込み用）。
+  final DateTime? startAt;
+
+  /// 終了日時。
+  final DateTime? endAt;
 
   /// 参加費・料金。
   final String? fee;
@@ -76,6 +84,8 @@ class EventInfo {
         'source': source,
         'venue': venue,
         'schedule': schedule,
+        if (startAt != null) 'startAt': startAt!.toIso8601String(),
+        if (endAt != null) 'endAt': endAt!.toIso8601String(),
         'fee': fee,
         'organizer': organizer,
         'description': description,
@@ -85,6 +95,14 @@ class EventInfo {
         source: json['source'] as String,
         venue: json['venue'] as String?,
         schedule: json['schedule'] as String?,
+        startAt: switch (json['startAt']) {
+          final String s => DateTime.tryParse(s),
+          _ => null,
+        },
+        endAt: switch (json['endAt']) {
+          final String s => DateTime.tryParse(s),
+          _ => null,
+        },
         fee: json['fee'] as String?,
         organizer: json['organizer'] as String?,
         description: json['description'] as String?,
@@ -286,7 +304,7 @@ final _converted = Expando<Object>('place');
 Object _placeOf(Map<String, dynamic> element) => _converted[element] ??= Place.fromOsm(element) ?? false;
 
 // カテゴリの判定（tool/build_data.py の classify と同じ規則）
-// ボランティアは社協・センターなどの施設（事務所）ではなく実際の開催地をイベント情報から出すため、OSM の施設は含めない。
+// ボランティア・有償体験は常設の施設や事務所ではなく、実際に開催されるイベントの会場をイベント情報から出すため、OSM の施設は含めない。
 final _highSchoolName = RegExp(r'高等学校|高校|中等教育学校|high school', caseSensitive: false);
 final _vocationalName = RegExp(r'専門学校|専修学校|職業能力開発|ポリテクセンター|ポリテクカレッジ|職業訓練');
 final _correspondenceName = RegExp(
@@ -301,8 +319,6 @@ final _cram = RegExp(r'塾|ゼミナール|教室|個別指導|予備校|進学|
 // 校舎・設備など、学校そのものではない建物
 final _schoolPart = RegExp(r'号館|棟|グラウンド|グランド|運動場|駐車場|駐輪場|寮|図書|体育館|AED|交番|センター前');
 const _eduAmenities = {'school', 'college', 'university', 'training', 'prep_school', 'language_school', 'music_school'};
-final _experienceName = RegExp(r'体験|ワークショップ|workshop|陶芸', caseSensitive: false);
-const _experienceCrafts = {'pottery', 'glassblower'};
 // 史跡・名所: 城跡・遺跡・古墳・歴史的建造物など（記念碑・祠・道標などは Wikidata にあるものだけ）、文化財、
 // Wikidata にある寺社・観光地
 const _historicValues = {
@@ -341,8 +357,6 @@ Set<PlaceCategory> classify(Map<String, dynamic> tags, String name) {
     if (amenity == 'university' || (amenity == 'college' && name.contains('大学')))
       PlaceCategory.university,
     if (correspondence) PlaceCategory.correspondence,
-    if (_experienceName.hasMatch(name) || _experienceCrafts.contains(tags['craft']))
-      PlaceCategory.experience,
     if (_foodAmenities.contains(amenity) || _foodShops.contains(shop)) PlaceCategory.restaurant,
     if (_beautyShops.contains(shop) && !name.contains('メンズエステ')) PlaceCategory.beauty,
     if (_isHistoric(tags)) PlaceCategory.historic,

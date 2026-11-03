@@ -138,7 +138,7 @@ const snsTagKeys = {
   SnsPlatform.youtube: ['contact:youtube', 'youtube'],
   SnsPlatform.line: ['contact:line'],
   SnsPlatform.threads: ['contact:threads'],
-  SnsPlatform.bluesky: ['contact:bluesky'],
+  SnsPlatform.bluesky: ['contact:bluesky', 'bluesky'],
 };
 
 final _userPatterns = {
@@ -147,7 +147,7 @@ final _userPatterns = {
   SnsPlatform.facebook: RegExp(r'^[A-Za-z0-9.\-]{2,80}$'),
   SnsPlatform.tiktok: RegExp(r'^[A-Za-z0-9._]{2,24}$'),
   SnsPlatform.threads: RegExp(r'^[A-Za-z0-9._]{1,30}$'),
-  SnsPlatform.bluesky: RegExp(r'^[A-Za-z0-9.\-]{3,253}\.[A-Za-z]{2,}$'),
+  SnsPlatform.bluesky: RegExp(r'^(?:[A-Za-z0-9.\-]{3,253}\.[A-Za-z]{2,}|did:[a-z]+:[A-Za-z0-9._:%\-]{4,200})$'),
 };
 
 /// ユーザー名ではないパス（投稿・共有ボタン・サービス自身のアカウントなど）。

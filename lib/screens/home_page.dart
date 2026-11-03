@@ -12,6 +12,7 @@ import '../models/place.dart';
 import '../services/location_service.dart';
 import '../services/search_history.dart';
 import '../widgets/listing_dialog.dart';
+import '../widgets/matchmaking_timeline.dart';
 import '../widgets/place_widgets.dart';
 import '../widgets/search_filters.dart';
 import 'sns_browser.dart';
@@ -113,11 +114,24 @@ class _HomePageState extends State<HomePage> {
     if (!_wide) setState(() => _tab = 1);
   }
 
+  /// Bluesky で [query] のアカウントを検索する（アプリ内ブラウザが使えなければ外部ブラウザで開く）。
+  void _searchBluesky(String query) {
+    if (!SnsBrowserController.supported) {
+      openExternal('https://bsky.app/search?q=${Uri.encodeQueryComponent(query)}');
+      return;
+    }
+    _browser.searchBluesky(query);
+    if (!_wide) setState(() => _tab = 1);
+  }
+
   List<NearbySnsTarget> _collectNearbySnsTargets() {
     final out = <NearbySnsTarget>[];
     for (final p in _controller.visiblePlaces) {
       for (final l in p.sortedLinks) {
-        if ((l.platform == SnsPlatform.instagram || l.platform == SnsPlatform.tiktok) && l.username != null) {
+        if ((l.platform == SnsPlatform.instagram ||
+                l.platform == SnsPlatform.tiktok ||
+                l.platform == SnsPlatform.bluesky) &&
+            l.username != null) {
           out.add((link: l, placeName: p.name));
         }
       }
@@ -191,6 +205,23 @@ class _HomePageState extends State<HomePage> {
   void _selectFromMap(Place place) {
     setState(() => _pickedPoint = null);
     _controller.select(place.id);
+  }
+
+  void _focusPlaceFromTimeline(Place place) {
+    setState(() {
+      _pickedPoint = null;
+      if (!_wide) _tab = 0;
+    });
+    if (!_controller.enabled.contains(PlaceCategory.matchmaking)) {
+      _controller.toggleCategory(PlaceCategory.matchmaking);
+    }
+    if (!_controller.audiences.contains(place.audience)) {
+      _controller.toggleAudience(place.audience);
+    }
+    _controller.select(place.id);
+    if (_mapReady) {
+      _map.move(place.position, math.max(_map.camera.zoom, 15));
+    }
   }
 
   void _onMapTap(TapPosition tap, LatLng point) {
@@ -621,7 +652,10 @@ class _HomePageState extends State<HomePage> {
                     ),
                   ),
                   const SizedBox(height: 8),
-                  MapFilterBar(controller: c),
+                  MapFilterBar(
+                    controller: c,
+                    onSelectPlaceFromTimeline: _focusPlaceFromTimeline,
+                  ),
                 ],
               ),
             ),
@@ -663,6 +697,15 @@ class _HomePageState extends State<HomePage> {
                         onOpenLink: (url) => _openLink(url, label: selected.name),
                         onSearchInstagram: _searchInstagram,
                         onSearchTikTok: _searchTikTok,
+                        onSearchBluesky: _searchBluesky,
+                        onOpenMatchmakingTimeline: selected.baseCategories.contains(PlaceCategory.matchmaking)
+                            ? () => showMatchmakingTimelineSheet(
+                                  context,
+                                  c,
+                                  initialHighlightPlaceId: selected.id,
+                                  onSelectPlace: _focusPlaceFromTimeline,
+                                )
+                            : null,
                         onPrevPlace: places.length >= 2 ? () => _stepSelectedPlace(-1) : null,
                         onNextPlace: places.length >= 2 ? () => _stepSelectedPlace(1) : null,
                         onClose: () => c.select(null),

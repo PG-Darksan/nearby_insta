@@ -48,7 +48,7 @@ class UserListing {
         kind: switch (category) {
           PlaceCategory.volunteer => 'ボランティア募集（開催地）',
           PlaceCategory.matchmaking => '婚活・合コン',
-          _ => '有償体験',
+          _ => '有償体験（開催イベント）',
         },
         website: url,
         listing: this,

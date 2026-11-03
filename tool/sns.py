@@ -20,7 +20,7 @@ TAG_KEYS = {
     'youtube': ('contact:youtube', 'youtube'),
     'line': ('contact:line',),
     'threads': ('contact:threads',),
-    'bluesky': ('contact:bluesky',),
+    'bluesky': ('contact:bluesky', 'bluesky'),
 }
 ALL_TAG_KEYS = tuple(k for keys in TAG_KEYS.values() for k in keys)
 
@@ -30,7 +30,7 @@ _USER = {
     'facebook': re.compile(r'^[A-Za-z0-9.\-]{2,80}$'),
     'tiktok': re.compile(r'^[A-Za-z0-9._]{2,24}$'),
     'threads': re.compile(r'^[A-Za-z0-9._]{1,30}$'),
-    'bluesky': re.compile(r'^[A-Za-z0-9.\-]{3,253}\.[A-Za-z]{2,}$'),
+    'bluesky': re.compile(r'^(?:[A-Za-z0-9.\-]{3,253}\.[A-Za-z]{2,}|did:[a-z]+:[A-Za-z0-9._:%\-]{4,200})$'),
 }
 
 # ユーザー名ではないパス（投稿・共有ボタン・公式アカウント自身など）

@@ -87,19 +87,18 @@ class OverpassService {
   }
 
   /// 小中学校は取らず、高校は名前か isced:level で絞って転送量を減らす（判定は classify と同じ）。
-  /// ボランティアは社協などの施設ではなく実際の開催地をイベント情報サイトから取得するため、ここには含めない。
+  /// ボランティア・有償体験は常設の施設ではなく実際に開催されるイベントの会場をイベント情報サイトから取得するため、ここには含めない。
   static String buildQuery(Bounds b) {
     return '[out:json][timeout:90][bbox:${b.overpass}];'
         '('
         'nwr["contact:instagram"];nwr["instagram"];'
         'nwr["contact:twitter"];nwr["twitter"];nwr["contact:x"];'
         'nwr["contact:facebook"];nwr["facebook"];'
-        'nwr["contact:tiktok"];nwr["contact:youtube"];nwr["contact:line"];nwr["contact:threads"];'
+        'nwr["contact:tiktok"];nwr["tiktok"];nwr["contact:youtube"];nwr["contact:line"];nwr["contact:threads"];'
+        'nwr["contact:bluesky"];nwr["bluesky"];'
         'nwr["amenity"="school"]["name"~"高等学校|高校|中等教育学校|high school",i];'
         'nwr["amenity"="school"]["isced:level"~"3"];'
         'nwr["amenity"~"^(university|college)\$"];'
-        'nwr["name"~"体験|ワークショップ|workshop|陶芸",i];'
-        'nwr["craft"~"^(pottery|glassblower)\$"];'
         'nwr["name"~"専門学校|専修学校|職業能力開発|ポリテク|職業訓練|通信制|通信教育|放送大学|通信大学|サイバー大学|'
         '八洲学園|星槎|サポート校|高等学院|クラーク記念|第一学院|ルネサンス.*高等学校|鹿島学園|鹿島朝日|鹿島山北|'
         'ヒューマンキャンパス|飛鳥未来|おおぞら高|'

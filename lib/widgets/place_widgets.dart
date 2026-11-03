@@ -173,6 +173,8 @@ class PlaceDetailCard extends StatelessWidget {
     this.platforms,
     this.onSearchInstagram,
     this.onSearchTikTok,
+    this.onSearchBluesky,
+    this.onOpenMatchmakingTimeline,
     this.onPrevPlace,
     this.onNextPlace,
     this.isHidden = false,
@@ -193,6 +195,12 @@ class PlaceDetailCard extends StatelessWidget {
   /// TikTok でアカウントを検索する（引数は検索語）。
   final ValueChanged<String>? onSearchTikTok;
 
+  /// Bluesky でアカウントを検索する（引数は検索語）。
+  final ValueChanged<String>? onSearchBluesky;
+
+  /// 婚活・合コンの日程タイムラインを開くコールバック。
+  final VoidCallback? onOpenMatchmakingTimeline;
+
   /// 前後のスポットへ高速切り替えするコールバック。
   final VoidCallback? onPrevPlace;
   final VoidCallback? onNextPlace;
@@ -212,7 +220,10 @@ class PlaceDetailCard extends StatelessWidget {
     final secondarySnsLinks = [
       for (final l in place.sortedLinks)
         if (link == null || l.platform != link.platform)
-          if (l.platform == SnsPlatform.instagram || l.platform == SnsPlatform.tiktok) l,
+          if (l.platform == SnsPlatform.instagram ||
+              l.platform == SnsPlatform.tiktok ||
+              l.platform == SnsPlatform.bluesky)
+            l,
     ];
     final description = listing?.description ?? event?.description;
     final details = <(IconData, String)>[
@@ -277,7 +288,7 @@ class PlaceDetailCard extends StatelessWidget {
                           icon: FaIcon(link.platform.icon, size: 16),
                           label: Text('${link.platform.label} で開く'),
                         ),
-                      for (final sec in secondarySnsLinks.take(1))
+                      for (final sec in secondarySnsLinks.take(2))
                         FilledButton.tonalIcon(
                           onPressed: () => onOpenLink(sec.url),
                           icon: FaIcon(sec.platform.icon, size: 15, color: sec.platform.color),
@@ -297,6 +308,17 @@ class PlaceDetailCard extends StatelessWidget {
                               ),
                       if (place.sortedLinks.any((l) => l.taggedPosts != null))
                         TaggedPostsButton(links: place.sortedLinks, onOpenLink: onOpenLink),
+                      if (place.baseCategories.contains(PlaceCategory.matchmaking) &&
+                          onOpenMatchmakingTimeline != null)
+                        OutlinedButton.icon(
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: PlaceCategory.matchmaking.color,
+                            side: BorderSide(color: PlaceCategory.matchmaking.color.withValues(alpha: 0.6)),
+                          ),
+                          onPressed: onOpenMatchmakingTimeline,
+                          icon: const Icon(Icons.timeline, size: 18),
+                          label: const Text('日程タイムラインで見る'),
+                        ),
                       if (!place.isListing && onSearchInstagram != null)
                         TextButton.icon(
                           onPressed: () => onSearchInstagram!(place.searchQuery),
@@ -308,6 +330,12 @@ class PlaceDetailCard extends StatelessWidget {
                           onPressed: () => onSearchTikTok!(place.searchQuery),
                           icon: FaIcon(SnsPlatform.tiktok.icon, size: 15),
                           label: const Text('TikTok で探す'),
+                        ),
+                      if (!place.isListing && onSearchBluesky != null)
+                        TextButton.icon(
+                          onPressed: () => onSearchBluesky!(place.searchQuery),
+                          icon: FaIcon(SnsPlatform.bluesky.icon, size: 15, color: SnsPlatform.bluesky.color),
+                          label: const Text('Bluesky で探す'),
                         ),
                       if (onToggleHidden case final toggle?)
                         FilterChip(

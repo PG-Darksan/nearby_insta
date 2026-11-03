@@ -91,6 +91,8 @@ CLASSIFY_CASES = [
     ({'shop': 'beauty'}, 'メンズエステ C', set()),
     ({'amenity': 'school', 'isced:level': '3'}, '県立第一', {'highSchool'}),
     ({'amenity': 'social_facility'}, '市ボランティアセンター', set()),
+    ({'tourism': 'attraction'}, '陶芸体験工房', set()),
+    ({'craft': 'pottery'}, 'テスト窯', set()),
     ({'historic': 'castle'}, '佐倉城', {'historic'}),
     ({'historic': 'archaeological_site'}, '明戸古墳', {'historic'}),
     ({'historic': 'memorial'}, '忠霊塔', set()),

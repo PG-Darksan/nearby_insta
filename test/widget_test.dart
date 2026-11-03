@@ -22,6 +22,7 @@ import 'package:nearby_insta/services/search_history.dart';
 import 'package:nearby_insta/services/sns_account_switcher.dart';
 import 'package:nearby_insta/services/sns_finder.dart';
 import 'package:nearby_insta/services/spot_data_service.dart';
+import 'package:nearby_insta/widgets/matchmaking_timeline.dart';
 import 'package:nearby_insta/widgets/place_widgets.dart';
 import 'package:nearby_insta/widgets/search_filters.dart';
 
@@ -304,8 +305,8 @@ void main() {
       expect(n.isInstitution, isTrue);
     });
 
-    test('体験施設は名前・タグで判定し、行政のボランティア施設や道路はボランティアに含めない', () {
-      // ボランティアは施設の場所ではなく開催地を表示するため、OSM の社会福祉協議会・ボランティアセンターは除外
+    test('ボランティア・有償体験は常設の施設ではなく開催イベントを出すため、OSM の施設や道路は含めない', () {
+      // ボランティア・有償体験は常設の場所ではなく開催イベントを表示するため、OSM の社会福祉協議会や常設の陶芸工房は除外
       expect(Place.fromOsm(_node(1, {'office': 'association', 'name': 'テスト市社会福祉協議会'})), isNull);
       expect(
         Place.fromOsm(
@@ -313,10 +314,13 @@ void main() {
             .categories,
         {PlaceCategory.sns},
       );
-      expect(Place.fromOsm(_node(2, {'tourism': 'attraction', 'name': '陶芸体験工房'}))!.categories,
-          {PlaceCategory.experience});
-      expect(Place.fromOsm(_node(3, {'craft': 'pottery', 'name': 'テスト窯'}))!.categories,
-          {PlaceCategory.experience});
+      expect(Place.fromOsm(_node(2, {'tourism': 'attraction', 'name': '陶芸体験工房'})), isNull);
+      expect(Place.fromOsm(_node(3, {'craft': 'pottery', 'name': 'テスト窯'})), isNull);
+      expect(
+        Place.fromOsm(_node(6, {'craft': 'pottery', 'name': 'テスト窯', 'contact:instagram': 'test_kama'}))!.categories,
+        {PlaceCategory.sns},
+      );
+      expect(PlaceCategory.experience.institution, isFalse);
       expect(Place.fromOsm(_node(4, {'highway': 'residential', 'name': 'ボランティア通り'})), isNull);
     });
 
@@ -416,7 +420,7 @@ void main() {
     expect(meta.tilesAround(const LatLng(35.39, 139.61), 3000), ['353_1396', '353_1395', '354_1396']);
   });
 
-  test('Overpass 用のタイルと問い合わせ（ボランティア施設の問い合わせは含めない）', () {
+  test('Overpass 用のタイルと問い合わせ（ボランティア・常設体験施設の問い合わせは含めない）', () {
     final tiles = PlaceRepository.tilesAround(const LatLng(35.658, 139.7016), 1000);
     // 約 2km 四方のタイルなので、半径 1km なら 2〜3 タイル四方
     expect(tiles.length, inInclusiveRange(4, 9));
@@ -425,6 +429,8 @@ void main() {
     expect(query, contains('nwr["contact:twitter"]'));
     expect(query, contains('nwr["shop"~"^(bakery|pastry|confectionery|hairdresser|beauty)\$"]["name"]'));
     expect(query, isNot(contains('社会福祉協議会')));
+    expect(query, isNot(contains('pottery')));
+    expect(query, isNot(contains('ワークショップ')));
   });
 
   test('UserListing は婚活・合コン・ボランティア・有償体験で JSON 往復できる', () {
@@ -784,11 +790,15 @@ void main() {
     // 種類のボタンは横にスクロールして選ぶ
     final restaurant = find.textContaining(PlaceCategory.restaurant.label);
     await tester.scrollUntilVisible(restaurant, 200, scrollable: find.byType(Scrollable).first);
+    await tester.ensureVisible(restaurant);
+    await tester.pumpAndSettle();
     await tester.tap(restaurant);
     await tester.pump();
     expect(c.enabled.contains(PlaceCategory.restaurant), isFalse);
 
     await tester.scrollUntilVisible(find.text('絞り込み'), -200, scrollable: find.byType(Scrollable).first);
+    await tester.ensureVisible(find.text('絞り込み'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('絞り込み'));
     await tester.pumpAndSettle();
     expect(find.text('検索範囲'), findsOneWidget);
@@ -1482,6 +1492,391 @@ void main() {
       expect(browser.activePlatform, SnsPlatform.tiktok);
       expect(browser.url, 'https://www.tiktok.com/@harajuku_cafe');
       expect(tester.takeException(), isNull);
+    });
+
+    test('WebViewCookieStore.resolveRestoreTarget: Android のドットなし instagram.com や期限欠落 Cookie を正しく正規化する', () {
+      const nowMs = 1762000000000;
+
+      // Android WebView の getCookieInfo が返すドットなし domain="instagram.com" + expiresDate=null
+      final dotlessSession = WebViewCookieStore.resolveRestoreTarget(
+        SnsPlatform.instagram,
+        const SavedCookie(
+          name: 'sessionid',
+          value: 'android_ig_session_123',
+          domain: 'instagram.com',
+          path: '/',
+          isSessionOnly: false,
+        ),
+        nowMs: nowMs,
+      );
+      expect(dotlessSession, isNotNull);
+      expect(dotlessSession!.url, 'https://www.instagram.com/');
+      expect(dotlessSession.domain, '.instagram.com');
+      expect(dotlessSession.expiresDateMs, greaterThan(nowMs));
+
+      // 古い Android WebView で domain=null になった認証 Cookie も .instagram.com として復元される
+      final nullDomainCsrf = WebViewCookieStore.resolveRestoreTarget(
+        SnsPlatform.instagram,
+        const SavedCookie(
+          name: 'csrftoken',
+          value: 'csrf_token_abc',
+          domain: null,
+        ),
+        nowMs: nowMs,
+      );
+      expect(nullDomainCsrf!.url, 'https://www.instagram.com/');
+      expect(nullDomainCsrf.domain, '.instagram.com');
+
+      // サブドメイン指定のホスト限定 Cookie や __Host- プレフィックスは domain=null を維持する
+      final hostOnly = WebViewCookieStore.resolveRestoreTarget(
+        SnsPlatform.instagram,
+        const SavedCookie(
+          name: '__Host-ig_Check',
+          value: '1',
+          domain: 'www.instagram.com',
+        ),
+        nowMs: nowMs,
+      );
+      expect(hostOnly!.url, 'https://www.instagram.com/');
+      expect(hostOnly.domain, isNull);
+      expect(hostOnly.isSecure, isTrue);
+    });
+
+    testWidgets('InstagramInstantSwitchBar: 360px 幅スマホでもログイン垢ワンタップ切替・別垢追加・スポット順送りが瞬時に動く',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(360, 740));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final cookieStore = _FakeBrowserCookieStore();
+      cookieStore.jar[SnsPlatform.instagram] = const [
+        SavedCookie(name: 'sessionid', value: 'ig_main_tok', domain: 'instagram.com'),
+      ];
+      final accounts = SnsAccountSwitcher(inMemoryOnly: true, cookieStore: cookieStore);
+      final jev = JevService(inMemoryOnly: true);
+      final browser = SnsBrowserController(jev: jev, accounts: accounts);
+      addTearDown(browser.dispose);
+
+      await accounts.ensureLoaded();
+      await accounts.updateDetectedViewer(SnsPlatform.instagram, 'main_insta');
+      await accounts.captureActiveSlot(SnsPlatform.instagram);
+
+      await accounts.addNewAccountSlot(SnsPlatform.instagram, customLabel: 'サブ垢');
+      cookieStore.jar[SnsPlatform.instagram] = const [
+        SavedCookie(name: 'sessionid', value: 'ig_sub_tok', domain: 'instagram.com'),
+      ];
+      await accounts.updateDetectedViewer(SnsPlatform.instagram, 'sub_insta');
+      await accounts.captureActiveSlot(SnsPlatform.instagram);
+
+      final mainSlot = accounts.slotsOf(SnsPlatform.instagram).first;
+      browser.open('https://www.instagram.com/spot_alpha/', label: 'スポットA');
+
+      const nearby = <NearbySnsTarget>[
+        (link: SocialLink(SnsPlatform.instagram, 'spot_alpha'), placeName: 'スポットA'),
+        (link: SocialLink(SnsPlatform.instagram, 'spot_beta'), placeName: 'スポットB'),
+      ];
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: InstagramInstantSwitchBar(
+            controller: browser,
+            nearbyTargets: nearby,
+          ),
+        ),
+      ));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+
+      expect(find.text('@main_insta'), findsOneWidget);
+      expect(find.text('@sub_insta'), findsOneWidget);
+      expect(find.text('1/2'), findsOneWidget);
+
+      // メニューを開かず @main_insta ピルの 1 タップだけで即座にセッションが切り替わる
+      await tester.tap(find.byKey(ValueKey('ig_slot_${mainSlot.id}')));
+      await tester.pumpAndSettle();
+      expect(accounts.activeSlotOf(SnsPlatform.instagram).username, 'main_insta');
+      expect(cookieStore.jar[SnsPlatform.instagram]!.single.value, 'ig_main_tok');
+
+      // 「垢切替」ボタン 1 タップで @sub_insta へローテーションする
+      await tester.tap(find.byKey(const ValueKey('ig_instant_cycle_btn')));
+      await tester.pumpAndSettle();
+      expect(accounts.activeSlotOf(SnsPlatform.instagram).username, 'sub_insta');
+      expect(cookieStore.jar[SnsPlatform.instagram]!.single.value, 'ig_sub_tok');
+
+      // スマホ 360px 幅でも右側の ▶ ボタンから次の周辺 Instagram アカウントへ瞬時に移動できる
+      await tester.tap(find.byKey(const ValueKey('ig_next_target_btn')));
+      await tester.pumpAndSettle();
+      expect(browser.currentTargetUsername, 'spot_beta');
+      expect(find.text('2/2'), findsOneWidget);
+
+      // 「別垢追加」1 タップで 3 つ目のスロットが作られログイン画面 URL へ遷移する
+      final addSlotBtn = find.byKey(const ValueKey('ig_instant_add_slot_btn'));
+      await tester.ensureVisible(addSlotBtn);
+      await tester.pumpAndSettle();
+      await tester.tap(addSlotBtn);
+      await tester.pumpAndSettle();
+      expect(accounts.slotsOf(SnsPlatform.instagram).length, 3);
+      expect(browser.url, 'https://www.instagram.com/accounts/login/');
+      expect(tester.takeException(), isNull);
+    });
+  });
+
+  group('有償体験の開催イベント抽出と婚活・合コンの日程タイムライン表示', () {
+    final now = DateTime(2026, 11, 3, 10);
+
+    test('こくちーずプロ: 有償ワークショップ・体験イベントを抽出し、無料・出店者募集・異業種交流会は除外する', () {
+      const html = r'''
+      <script type="application/ld+json">
+      [
+        {
+          "@context": "http://schema.org",
+          "@type": "Event",
+          "name": "電動ろくろで作る季節の器・陶芸体験ワークショップ",
+          "url": "https://www.kokuchpro.com/event/pottery_ws_1114/",
+          "startDate": "2026-11-14T10:30:00+09:00",
+          "endDate": "2026-11-14T12:30:00+09:00",
+          "description": "初心者歓迎の陶芸体験。参加費：3,800円（材料・焼成費込み）",
+          "eventAttendanceMode": "https://schema.org/OfflineEventAttendanceMode",
+          "location": {
+            "@type": "Place",
+            "name": "横浜クラフトルーム",
+            "address": "神奈川県横浜市西区みなとみらい2-3-1",
+            "geo": {"@type": "GeoCoordinates", "latitude": "35.4561", "longitude": "139.6324"}
+          },
+          "organizer": {"@type": "Organization", "name": "みなとみらい陶芸倶楽部"}
+        },
+        {
+          "@context": "http://schema.org",
+          "@type": "Event",
+          "name": "参加無料・プログラミング無料体験セミナー",
+          "url": "https://www.kokuchpro.com/event/free_trial/",
+          "startDate": "2026-11-14T14:00:00+09:00",
+          "location": {
+            "@type": "Place",
+            "name": "会議室A",
+            "address": "神奈川県横浜市西区北幸1-1-1",
+            "geo": {"@type": "GeoCoordinates", "latitude": 35.466, "longitude": 139.622}
+          },
+          "offers": {"@type": "Offer", "price": "0", "priceCurrency": "JPY"}
+        },
+        {
+          "@context": "http://schema.org",
+          "@type": "Event",
+          "name": "ハンドメイドマルシェワークショップ出店者募集",
+          "url": "https://www.kokuchpro.com/event/vendor_recruit/",
+          "startDate": "2026-11-20T10:00:00+09:00",
+          "location": {
+            "@type": "Place",
+            "name": "イベントホール",
+            "address": "神奈川県横浜市中区桜木町1-1",
+            "geo": {"@type": "GeoCoordinates", "latitude": 35.451, "longitude": 139.631}
+          },
+          "offers": {"@type": "Offer", "price": "3000", "priceCurrency": "JPY"}
+        }
+      ]
+      </script>
+      ''';
+
+      final parsed = EventService.parseKokuchproHtml(html, now: now, forcedPaid: true);
+      expect(parsed.length, 1);
+      final ws = parsed.single;
+      expect(ws.category, PlaceCategory.experience);
+      expect(ws.fee, '3,800円');
+      expect(ws.venue, '横浜クラフトルーム');
+      expect(ws.startAt, DateTime(2026, 11, 14, 10, 30));
+      expect(ws.endAt, DateTime(2026, 11, 14, 12, 30));
+    });
+
+    test('いこーよ: 有償の体験・ワークショップ開催イベントを抽出し、完全無料ラベル付きイベントは除外する', () {
+      const html = r'''
+      <html>
+      <head>
+        <script type="application/ld+json">
+        [
+          {
+            "@context": "http://schema.org",
+            "@type": "Event",
+            "name": "親子でステンドグラス風キャンドル作りワークショップ",
+            "startDate": "2026-11-15",
+            "endDate": "2026-11-15",
+            "description": "参加費：1,500円。素敵なキャンドルを手作り体験！",
+            "location": {
+              "@type": "Place",
+              "name": "親子でステンドグラス風キャンドル作りワークショップ",
+              "address": {
+                "@type": "PostalAddress",
+                "addressLocality": "神奈川県大和市下鶴間2-5-40 つるカフェ食堂"
+              }
+            },
+            "organizer": {"@type": "Organization", "name": "つるクラフト"}
+          },
+          {
+            "@context": "http://schema.org",
+            "@type": "Event",
+            "name": "どんぐり工作体験デー",
+            "startDate": "2026-11-15",
+            "endDate": "2026-11-15",
+            "description": "どなたでも参加できます",
+            "location": {
+              "@type": "Place",
+              "name": "市民の森公園",
+              "address": {
+                "@type": "PostalAddress",
+                "addressLocality": "神奈川県横浜市西区みなとみらい1-1-1 市民の森公園"
+              }
+            }
+          }
+        ]
+        </script>
+      </head>
+      <body>
+        <li class="p-index-list-item">
+          <a href="/events/609589">
+            <h3 class="p-index-list-item__heading">親子でステンドグラス風キャンドル作りワークショップ</h3>
+          </a>
+        </li>
+        <li class="p-index-list-item">
+          <div class="p-index-list-item__label--green">完全無料</div>
+          <a href="/events/609590">
+            <h3 class="p-index-list-item__heading">どんぐり工作体験デー</h3>
+          </a>
+        </li>
+      </body>
+      </html>
+      ''';
+
+      final parsed = EventService.parseIkoyoListHtml(html, now: now);
+      expect(parsed.length, 1);
+      final item = parsed.single;
+      expect(item.category, PlaceCategory.experience);
+      expect(item.url, 'https://iko-yo.net/events/609589');
+      expect(item.address, '神奈川県大和市下鶴間2-5-40');
+      expect(item.venue, 'つるカフェ食堂');
+      expect(item.coarseArea, '大和市');
+      expect(item.fee, '1,500円');
+      expect(item.schedule, '11/15(日)');
+    });
+
+    testWidgets('MatchmakingTimelineView: 婚活・合コンを開催日時順のタイムラインで表示し、日付絞り込み・地図選択ができる',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(390, 820));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final events = [
+        Place(
+          id: 'event/sunday_night',
+          name: '渋谷ワイン合コンパーティー',
+          position: const LatLng(35.659, 139.701),
+          categories: {PlaceCategory.matchmaking},
+          kind: '合コン',
+          website: 'https://example.com/sunday_night',
+          event: EventInfo(
+            source: '街コンジャパン',
+            venue: '渋谷バル',
+            schedule: '11/8(日) 18:30〜20:30',
+            startAt: DateTime(2026, 11, 8, 18, 30),
+            endAt: DateTime(2026, 11, 8, 20, 30),
+            fee: '男性 6,000円 / 女性 1,500円',
+          ),
+        ),
+        Place(
+          id: 'event/saturday_cafe',
+          name: '表参道1on1恋活カフェ会',
+          position: const LatLng(35.665, 139.710),
+          categories: {PlaceCategory.matchmaking},
+          kind: '恋活イベント',
+          website: 'https://example.com/saturday_cafe',
+          event: EventInfo(
+            source: 'オミカレ',
+            venue: '表参道ラウンジ',
+            schedule: '11/7(土) 14:00〜16:00',
+            startAt: DateTime(2026, 11, 7, 14, 0),
+            endAt: DateTime(2026, 11, 7, 16, 0),
+            fee: '男性 4,500円 / 女性 1,000円',
+          ),
+        ),
+        Place(
+          id: 'event/sunday_noon',
+          name: '恵比寿ランチ街コン',
+          position: const LatLng(35.647, 139.710),
+          categories: {PlaceCategory.matchmaking},
+          kind: '街コン',
+          website: 'https://example.com/sunday_noon',
+          event: EventInfo(
+            source: 'こくちーずプロ',
+            venue: '恵比寿イタリアン',
+            schedule: '11/8(日) 12:30〜14:30',
+            startAt: DateTime(2026, 11, 8, 12, 30),
+            endAt: DateTime(2026, 11, 8, 14, 30),
+            fee: '男性 5,500円 / 女性 2,000円',
+          ),
+        ),
+      ];
+
+      final controller = NearbyController(
+        repository: _FakePlaceRepository(const []),
+        events: _FakeEventService(events),
+        hiddenStore: _FakeHiddenStore(),
+        listingStore: _FakeListingStore(),
+        historyStore: _FakeHistoryStore(),
+        geocoding: _NoopGeocoding(),
+        finder: _NoopSnsFinder(),
+      );
+      addTearDown(controller.dispose);
+      await controller.setCenter(const LatLng(35.658, 139.701), name: '渋谷駅', radius: 5000);
+
+      Place? selectedFromTimeline;
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: Column(
+            children: [
+              ListenableBuilder(
+                listenable: controller,
+                builder: (context, _) => MapFilterBar(
+                  controller: controller,
+                  onSelectPlaceFromTimeline: (p) => selectedFromTimeline = p,
+                ),
+              ),
+              Expanded(
+                child: MatchmakingTimelineView(
+                  controller: controller,
+                  referenceNow: DateTime(2026, 11, 3, 12),
+                  onSelectPlace: (p) => selectedFromTimeline = p,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+
+      // MapFilterBar に「婚活日程 3」チップが表示される
+      expect(find.text('婚活日程 3'), findsOneWidget);
+
+      // タイムライン上で日時順（11/7 14:00 -> 11/8 12:30 -> 11/8 18:30）に並んでいることを確認
+      final satY = tester.getTopLeft(find.text('表参道1on1恋活カフェ会')).dy;
+      final sunNoonY = tester.getTopLeft(find.text('恵比寿ランチ街コン')).dy;
+      final sunNightY = tester.getTopLeft(find.text('渋谷ワイン合コンパーティー')).dy;
+      expect(satY, lessThan(sunNoonY));
+      expect(sunNoonY, lessThan(sunNightY));
+
+      // 日付チップ「11/8(日) 2」をタップすると 11/8 の 2 件だけに絞り込まれる
+      final sundayChip = find.text('11/8(日) 2');
+      await tester.ensureVisible(sundayChip);
+      await tester.pumpAndSettle();
+      await tester.tap(sundayChip);
+      await tester.pumpAndSettle();
+      expect(find.text('表参道1on1恋活カフェ会'), findsNothing);
+      expect(find.text('恵比寿ランチ街コン'), findsOneWidget);
+      expect(find.text('渋谷ワイン合コンパーティー'), findsOneWidget);
+
+      // 「地図で見る」を押すと選択コールバックが呼ばれ、非表示カテゴリだった場合も自動で有効化される
+      controller.toggleCategory(PlaceCategory.matchmaking);
+      expect(controller.enabled.contains(PlaceCategory.matchmaking), isFalse);
+      await tester.tap(find.text('地図で見る').first);
+      await tester.pumpAndSettle();
+      expect(selectedFromTimeline?.id, 'event/sunday_noon');
+      expect(controller.enabled.contains(PlaceCategory.matchmaking), isTrue);
     });
   });
 }

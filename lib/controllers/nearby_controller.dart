@@ -84,7 +84,7 @@ class NearbyController extends ChangeNotifier {
   /// 公式サイトなどから SNS アカウントを探している間の経過メッセージ。
   String? snsStatus;
 
-  /// 婚活・合コン・ボランティア開催地を取得している間の経過メッセージ。
+  /// 婚活・合コン・ボランティア・有償体験の開催イベントを取得している間の経過メッセージ。
   String? eventStatus;
 
   List<UserListing> listings = [];
@@ -294,7 +294,7 @@ class NearbyController extends ChangeNotifier {
   }
 
   Future<void> _loadEvents(int seq, LatLng at, {required bool refresh}) async {
-    eventStatus = '婚活・合コン・ボランティアの開催地を確認中…';
+    eventStatus = '婚活・合コン・ボランティア・有償体験のイベントを確認中…';
     notifyListeners();
     try {
       final found = await _events.load(

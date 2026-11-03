@@ -16,7 +16,7 @@ typedef PreparedAvatar = ({String base64, String format});
 /// アカウントのアイコン URL から画像を取得し、TypeSafe API の制限（280〜1568px, PNG/JPEG）に合わせて整形する関数。
 typedef AvatarPreparer = Future<PreparedAvatar?> Function(String url, http.Client client);
 
-/// Instagram・TikTok のフォロー中・フォロワー一覧から抽出した 1 アカウント分の判定対象（アイコン画像＋名前）。
+/// Instagram・TikTok・Bluesky のフォロー中・フォロワー一覧から抽出した 1 アカウント分の判定対象（アイコン画像＋名前）。
 class InstagramAccountCandidate {
   const InstagramAccountCandidate({
     required this.username,
@@ -30,7 +30,7 @@ class InstagramAccountCandidate {
   final String username;
   final String displayName;
 
-  /// 抽出元 SNS（`'instagram'` または `'tiktok'`）。
+  /// 抽出元 SNS（`'instagram'`・`'tiktok'`・`'bluesky'`）。
   final String platform;
 
   /// SNS CDN のプロフィールアイコン URL（WebView 側で `<canvas>` 取得できなかった場合のフォールバック用）。
@@ -43,18 +43,19 @@ class InstagramAccountCandidate {
   final String? avatarFormat;
 
   bool get isTikTok => platform.trim().toLowerCase() == 'tiktok';
+  bool get isBluesky => platform.trim().toLowerCase() == 'bluesky';
 
   bool get hasAvatarSource =>
       avatarUrl.trim().isNotEmpty || (avatarBase64 != null && avatarBase64!.trim().isNotEmpty);
 
-  /// Instagram / TikTok CDN の署名クエリ（`?oh=...&oe=...` / `?x-expires=...&x-signature=...`）を除いた安定したアイコン識別子。
+  /// Instagram / TikTok / Bluesky CDN の署名クエリや拡張子サフィックス（`@jpeg` / `@webp`）を除いた安定したアイコン識別子。
   String get avatarId {
     final rawUrl = avatarUrl.trim();
     if (rawUrl.isNotEmpty) {
       final uri = Uri.tryParse(rawUrl);
       final nonEmpty = uri?.pathSegments.where((s) => s.isNotEmpty).toList() ?? const <String>[];
       if (nonEmpty.isNotEmpty) {
-        final last = nonEmpty.last;
+        final last = nonEmpty.last.replaceFirst(RegExp(r'@[a-z0-9]+$', caseSensitive: false), '');
         // TikTok CDN で末尾が "100x100.jpeg" 等の解像度名のみの場合は直前のハッシュも連結する
         if (nonEmpty.length >= 2 && RegExp(r'^\d+x\d+\.[a-z0-9]+$', caseSensitive: false).hasMatch(last)) {
           return '${nonEmpty[nonEmpty.length - 2]}_$last'.toLowerCase();
@@ -72,10 +73,12 @@ class InstagramAccountCandidate {
     return '';
   }
 
-  /// Instagram の既存キャッシュキーと完全互換を保ちつつ、TikTok は `tt:` プレフィックスで衝突を防ぐ。
+  /// Instagram の既存キャッシュキーと完全互換を保ちつつ、TikTok (`tt:`) や Bluesky (`bsky:`) はプレフィックスで衝突を防ぐ。
   String get cacheKey {
     final base = '${username.trim().toLowerCase()}|${displayName.trim().toLowerCase()}|$avatarId';
-    return isTikTok ? 'tt:$base' : base;
+    if (isTikTok) return 'tt:$base';
+    if (isBluesky) return 'bsky:$base';
+    return base;
   }
 }
 
@@ -588,10 +591,16 @@ class JevService extends ChangeNotifier {
     String nonce = 'jev0',
   }) {
     final hasTikTok = batch.any((c) => c.isTikTok);
-    final hasInstagram = batch.any((c) => !c.isTikTok);
-    final platformScope = (hasTikTok && hasInstagram)
-        ? 'SNS (Instagram / TikTok)'
-        : (hasTikTok ? 'TikTok' : 'Instagram');
+    final hasBluesky = batch.any((c) => c.isBluesky);
+    final hasInstagram = batch.any((c) => !c.isTikTok && !c.isBluesky);
+    final activeLabels = <String>[
+      if (hasInstagram) 'Instagram',
+      if (hasTikTok) 'TikTok',
+      if (hasBluesky) 'Bluesky',
+    ];
+    final platformScope = activeLabels.isEmpty
+        ? 'Instagram'
+        : (activeLabels.length == 1 ? activeLabels.single : 'SNS (${activeLabels.join(' / ')})');
     final state = StringBuffer()
       ..writeln(
         'Task: Judge whether each numbered $platformScope account is a FEMALE individual\'s personal account '
@@ -622,7 +631,7 @@ class JevService extends ChangeNotifier {
 
     for (var i = 0; i < batch.length; i++) {
       final item = batch[i];
-      final snsLabel = item.isTikTok ? 'TikTok' : 'Instagram';
+      final snsLabel = item.isTikTok ? 'TikTok' : (item.isBluesky ? 'Bluesky' : 'Instagram');
       final u = item.username.trim().replaceAll('"', '');
       var d = item.displayName.replaceAll(RegExp(r'\s+'), ' ').trim().replaceAll('"', "'");
       if (d.length > 80) d = d.substring(0, 80);
@@ -693,7 +702,9 @@ class JevService extends ChangeNotifier {
     final hostLower = uri.host.toLowerCase();
     final referer = (hostLower.contains('tiktok') || hostLower.contains('musical.ly') || hostLower.contains('byteimg'))
         ? 'https://www.tiktok.com/'
-        : ((hostLower.contains('instagram') || hostLower.contains('fbcdn')) ? 'https://www.instagram.com/' : null);
+        : ((hostLower.contains('bsky.app') || hostLower.contains('bsky.social') || hostLower.contains('bsky.network'))
+            ? 'https://bsky.app/'
+            : ((hostLower.contains('instagram') || hostLower.contains('fbcdn')) ? 'https://www.instagram.com/' : null));
     final res = await client.get(uri, headers: {
       'Accept': 'image/jpeg,image/png,image/webp,image/*,*/*;q=0.8',
       'User-Agent': 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36',

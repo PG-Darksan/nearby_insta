@@ -19,8 +19,8 @@ import '../widgets/place_widgets.dart';
 enum InstagramSearchStatus { none, waitingForLogin, searching, failed }
 
 /// SNS ブラウザ内で保持する WebView ペインの種別。
-/// Instagram と TikTok を別々の WebView として同時に保持し、再読み込みなし（0秒）で切り替えられるようにする。
-enum SnsPaneKind { instagram, tiktok, other }
+/// Instagram・TikTok・Bluesky を別々の WebView として同時に保持し、再読み込みなし（0秒）で切り替えられるようにする。
+enum SnsPaneKind { instagram, tiktok, bluesky, other }
 
 /// 地図上のスポットなどから渡される、高速切り替え対象の SNS アカウント候補。
 typedef NearbySnsTarget = ({SocialLink link, String placeName});
@@ -53,10 +53,10 @@ class _PaneState {
 
 /// アプリ内の SNS ブラウザの状態。地図や一覧からアカウントを開くときにも使う。
 ///
-/// - Instagram と TikTok の WebView を並列保持し、ワンタップで再読み込みなしに高速切り替えできる。
-/// - [SnsAccountSwitcher] により、自分の複数の Instagram / TikTok ログインアカウント（セッション）も
+/// - Instagram・TikTok・Bluesky の WebView を並列保持し、ワンタップで再読み込みなしに高速切り替えできる。
+/// - [SnsAccountSwitcher] により、自分の複数の Instagram / TikTok / Bluesky ログインアカウント（セッション）も
 ///   パスワードをアプリに保存せずワンタップで切り替えられる。
-/// - Instagram と TikTok の両方で「フォロー中」「フォロワー」一覧を開いた際、Jev で女性個人アカウントのみを抽出できる。
+/// - Instagram・TikTok・Bluesky で「フォロー中」「フォロワー」一覧を開いた際、Jev で女性個人アカウントのみを抽出できる。
 class SnsBrowserController extends ChangeNotifier {
   SnsBrowserController({
     JevService? jev,
@@ -81,8 +81,18 @@ class SnsBrowserController extends ChangeNotifier {
 
   static const tiktokHomeUrl = 'https://www.tiktok.com/';
 
-  /// TikTok のユーザー検索画面（自動再生動画フィードを避けて軽量にウォームアップ・検索できる）。
-  static const tiktokSearchUrl = 'https://www.tiktok.com/search/user';
+  static const blueskyHomeUrl = 'https://bsky.app/';
+
+  /// Bluesky のアカウント・投稿検索画面。
+  static const blueskySearchUrl = 'https://bsky.app/search';
+
+  /// TikTok Web はモバイル UA だとアプリ誘導バナーで一覧・フォロー欄が制限されるため、PC 版 Chrome UA を用いる。
+  static const desktopChromeUserAgent =
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
+  /// Android WebView 既定 UA に含まれる `; wv` によるログイン遮断を避けるための標準モバイル Chrome UA。
+  static const mobileCleanChromeUserAgent =
+      'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36';
 
   /// Windows の WebView2 環境。ログイン状態の保存先をアプリのデータフォルダーにする。
   static WebViewEnvironment? _environment;
@@ -115,6 +125,7 @@ class SnsBrowserController extends ChangeNotifier {
   final Map<SnsPaneKind, _PaneState> _panes = {
     SnsPaneKind.instagram: _PaneState(SnsPaneKind.instagram),
     SnsPaneKind.tiktok: _PaneState(SnsPaneKind.tiktok),
+    SnsPaneKind.bluesky: _PaneState(SnsPaneKind.bluesky),
     SnsPaneKind.other: _PaneState(SnsPaneKind.other),
   };
 
@@ -132,6 +143,7 @@ class SnsBrowserController extends ChangeNotifier {
         switch (kind) {
           SnsPaneKind.instagram => homeUrl,
           SnsPaneKind.tiktok => tiktokHomeUrl,
+          SnsPaneKind.bluesky => blueskyHomeUrl,
           SnsPaneKind.other => homeUrl,
         };
   }
@@ -164,6 +176,7 @@ class SnsBrowserController extends ChangeNotifier {
   SnsPlatform get activePlatform => switch (_activePane) {
         SnsPaneKind.instagram => SnsPlatform.instagram,
         SnsPaneKind.tiktok => SnsPlatform.tiktok,
+        SnsPaneKind.bluesky => SnsPlatform.bluesky,
         SnsPaneKind.other => SnsBrowser.platformOf(_current.url) ?? SnsPlatform.x,
       };
 
@@ -203,6 +216,7 @@ class SnsBrowserController extends ChangeNotifier {
     await Future.wait([
       _syncFemaleFilterToPane(_pane(SnsPaneKind.instagram), resetJudged: resetJudged),
       _syncFemaleFilterToPane(_pane(SnsPaneKind.tiktok), resetJudged: resetJudged),
+      _syncFemaleFilterToPane(_pane(SnsPaneKind.bluesky), resetJudged: resetJudged),
       _syncFemaleFilterToPane(_pane(SnsPaneKind.other), resetJudged: resetJudged),
     ]);
   }
@@ -224,8 +238,10 @@ class SnsBrowserController extends ChangeNotifier {
     } catch (_) {}
   }
 
-  /// 初回の Instagram / TikTok アカウント検索や切り替えでも待たずに表示できるよう、裏で検索画面を読み込んでおく。
-  void warmUp({bool includeTikTok = true}) {
+  /// 初回の Instagram / Bluesky アカウント検索や切り替えでも待たずに表示できるよう、裏で検索画面を読み込んでおく。
+  /// ※ TikTok の `/search/user` はクエリなしだと空画面になりログイン後の遷移先も空になるため、
+  ///   TikTok ペインは必要時に `tiktokHomeUrl` またはクエリ付き `/search/user?q=...` で起動する。
+  void warmUp({bool includeBluesky = true}) {
     if (!supported) return;
     var changed = false;
     final ig = _pane(SnsPaneKind.instagram);
@@ -234,11 +250,11 @@ class SnsBrowserController extends ChangeNotifier {
       ig.pendingUrl = searchUrl;
       changed = true;
     }
-    if (includeTikTok) {
-      final tt = _pane(SnsPaneKind.tiktok);
-      if (!tt.started) {
-        tt.started = true;
-        tt.pendingUrl = tiktokSearchUrl;
+    if (includeBluesky) {
+      final bsky = _pane(SnsPaneKind.bluesky);
+      if (!bsky.started) {
+        bsky.started = true;
+        bsky.pendingUrl = blueskySearchUrl;
         changed = true;
       }
     }
@@ -249,12 +265,14 @@ class SnsBrowserController extends ChangeNotifier {
     final uri = Uri.tryParse(target);
     if (_isInstagramHost(uri)) return SnsPaneKind.instagram;
     if (_isTikTokHost(uri)) return SnsPaneKind.tiktok;
+    if (_isBlueskyHost(uri)) return SnsPaneKind.bluesky;
     return SnsPaneKind.other;
   }
 
   static SnsPaneKind _paneKindForPlatform(SnsPlatform platform) => switch (platform) {
         SnsPlatform.instagram => SnsPaneKind.instagram,
         SnsPlatform.tiktok => SnsPaneKind.tiktok,
+        SnsPlatform.bluesky => SnsPaneKind.bluesky,
         _ => SnsPaneKind.other,
       };
 
@@ -273,8 +291,8 @@ class SnsBrowserController extends ChangeNotifier {
     _activePane = next;
   }
 
-  /// Instagram ⇄ TikTok（および他 SNS）をワンタップで高速切り替えする。
-  /// すでに開いている Instagram / TikTok ペインがあれば再読み込みせず 0 秒で表示を切り替える。
+  /// Instagram ⇄ TikTok ⇄ Bluesky（および他 SNS）をワンタップで高速切り替えする。
+  /// すでに開いているペインがあれば再読み込みせず 0 秒で表示を切り替える。
   void switchPlatform(SnsPlatform platform) {
     final nextKind = _paneKindForPlatform(platform);
     final pane = _pane(nextKind);
@@ -287,12 +305,39 @@ class SnsBrowserController extends ChangeNotifier {
         return;
       }
     } else if (!pane.started) {
-      _loadInPane(pane, platform == SnsPlatform.tiktok ? tiktokHomeUrl : homeUrl);
+      final defaultUrl = switch (platform) {
+        SnsPlatform.tiktok => tiktokHomeUrl,
+        SnsPlatform.bluesky => blueskyHomeUrl,
+        _ => homeUrl,
+      };
+      _loadInPane(pane, defaultUrl);
       return;
     } else if (pane.url == null && pane.pendingUrl != null) {
       pane.url = pane.pendingUrl;
     }
+    if (nextKind == SnsPaneKind.tiktok && isBlankTikTokSearchUri(Uri.tryParse(pane.url ?? ''))) {
+      _recoverBlankTikTokPage(pane);
+      return;
+    }
     notifyListeners();
+  }
+
+  /// TikTok の検索ルートで `q` クエリが空（何も表示されない白画面状態）かどうか判定する。
+  @visibleForTesting
+  static bool isBlankTikTokSearchUri(Uri? uri) {
+    if (!_isTikTokHost(uri)) return false;
+    final path = uri!.path.toLowerCase();
+    final isSearchRoute = RegExp(r'^/search(/(user|video|live|photo))?/?$').hasMatch(path);
+    if (!isSearchRoute) return false;
+    return (uri.queryParameters['q'] ?? '').trim().isEmpty;
+  }
+
+  void _recoverBlankTikTokPage(_PaneState pane) {
+    final q = pane.searchQuery?.trim() ?? '';
+    final fallback = q.isNotEmpty
+        ? 'https://www.tiktok.com/search/user?q=${Uri.encodeQueryComponent(q)}'
+        : tiktokHomeUrl;
+    _loadInPane(pane, fallback);
   }
 
   /// [target] を開く。Instagram / TikTok のプロフィール間移動なら可能な限り SPA 内部遷移で高速に切り替える。
@@ -321,7 +366,7 @@ class SnsBrowserController extends ChangeNotifier {
         targetUri != null &&
         currentUri != null &&
         ((_isInstagramHost(targetUri) && _isInstagramHost(currentUri) && !_isInstagramLoginPath(currentUri)) ||
-            (_isTikTokHost(targetUri) && _isTikTokHost(currentUri) && !_isTikTokLoginPath(currentUri)));
+            (_isBlueskyHost(targetUri) && _isBlueskyHost(currentUri)));
 
     pane.started = true;
     pane.url = target;
@@ -361,17 +406,30 @@ class SnsBrowserController extends ChangeNotifier {
   static bool _isTikTokHost(Uri? uri) =>
       uri != null && (uri.host == 'tiktok.com' || uri.host.endsWith('.tiktok.com'));
 
-  static bool _isJevSupportedHost(Uri? uri) => _isInstagramHost(uri) || _isTikTokHost(uri);
+  static bool _isBlueskyHost(Uri? uri) =>
+      uri != null && (uri.host == 'bsky.app' || uri.host.endsWith('.bsky.app'));
 
-  static bool _isInstagramLoginPath(Uri uri) =>
-      uri.path.startsWith('/accounts/') || uri.path.startsWith('/challenge/');
+  static bool _isJevSupportedHost(Uri? uri) =>
+      _isInstagramHost(uri) || _isTikTokHost(uri) || _isBlueskyHost(uri);
+
+  static bool _isInstagramLoginPath(Uri uri) {
+    final p = uri.path.toLowerCase();
+    return p.startsWith('/accounts/login') ||
+        p.startsWith('/accounts/emailsignup') ||
+        p.startsWith('/accounts/password') ||
+        p.startsWith('/challenge/');
+  }
+
+  static bool _isInstagramOneTapPath(Uri uri) => uri.path.toLowerCase().startsWith('/accounts/onetap');
 
   static bool _isTikTokLoginPath(Uri uri) => uri.path.startsWith('/login');
 
-  /// 指定した SNS（Instagram または TikTok）で [query] のアカウントを高速検索する。
+  /// 指定した SNS（Instagram・TikTok・Bluesky）で [query] のアカウントを高速検索する。
   void searchSns(SnsPlatform platform, String query) {
     if (platform == SnsPlatform.tiktok) {
       searchTikTok(query);
+    } else if (platform == SnsPlatform.bluesky) {
+      searchBluesky(query);
     } else if (platform == SnsPlatform.instagram) {
       searchInstagram(query);
     } else {
@@ -407,8 +465,7 @@ class SnsBrowserController extends ChangeNotifier {
     _loadInPane(pane, searchUrl);
   }
 
-  /// TikTok で [query] のユーザー（アカウント）一覧を高速検索する。
-  /// すでに TikTok ペインが起動していれば SPA 内部遷移と検索欄書き換えで素早く切り替える。
+  /// TikTok で [query] のユーザー（アカウント）一覧を検索する。
   void searchTikTok(String query) {
     final trimmed = query.trim();
     if (trimmed.isEmpty) return;
@@ -420,14 +477,30 @@ class SnsBrowserController extends ChangeNotifier {
     pane.searchStatus = InstagramSearchStatus.none;
 
     final target = 'https://www.tiktok.com/search/user?q=${Uri.encodeQueryComponent(trimmed)}';
+    _loadInPane(pane, target);
+  }
+
+  /// Bluesky で [query] のアカウント・投稿を高速検索する。
+  /// すでに Bluesky ペインが起動していれば SPA 内部遷移と検索欄書き換えで素早く切り替える。
+  void searchBluesky(String query) {
+    final trimmed = query.trim();
+    if (trimmed.isEmpty) return;
+    final pane = _pane(SnsPaneKind.bluesky);
+    _setActivePane(SnsPaneKind.bluesky);
+    pane.pendingSearch = null;
+    pane.searchId++;
+    pane.searchQuery = trimmed;
+    pane.searchStatus = InstagramSearchStatus.none;
+
+    final target = 'https://bsky.app/search?q=${Uri.encodeQueryComponent(trimmed)}';
     final current = Uri.tryParse(pane.url ?? '');
-    if (pane.web != null && _isTikTokHost(current) && !_isTikTokLoginPath(current!)) {
+    if (pane.web != null && _isBlueskyHost(current)) {
       pane.url = target;
       notifyListeners();
       unawaited(
         pane.web!
             .callAsyncJavaScript(
-              functionBody: _tiktokSearchScript,
+              functionBody: _blueskySearchScript,
               arguments: {'query': trimmed, 'targetUrl': target},
             )
             .catchError((_) {
@@ -441,6 +514,7 @@ class SnsBrowserController extends ChangeNotifier {
   }
 
   /// `@username`（またはプロフィール URL）へ直接ジャンプする。
+  /// Bluesky でドットを含まないハンドル（例: `shibuya-cafe`）が入力された場合は `.bsky.social` を自動補完する。
   void openUsername(SnsPlatform platform, String rawHandle, {String? label}) {
     final trimmed = rawHandle.trim();
     if (trimmed.isEmpty) return;
@@ -448,10 +522,54 @@ class SnsBrowserController extends ChangeNotifier {
       open(trimmed, label: label);
       return;
     }
-    final clean = trimmed.replaceFirst(RegExp(r'^@+'), '');
+    var clean = trimmed.replaceFirst(RegExp(r'^@+'), '');
+    if (platform == SnsPlatform.bluesky && !clean.contains('.') && !clean.startsWith('did:')) {
+      clean = '$clean.bsky.social';
+    }
     final parsed = parseSnsTag(platform, clean).firstOrNull;
     final link = parsed ?? SocialLink(platform, clean);
     open(link.url, label: label);
+  }
+
+  /// 現在開いているプロフィールページの「フォロー中」または「フォロワー」一覧を開く。
+  /// - Instagram / Bluesky は一覧 URL へ直接 SPA 遷移する。
+  /// - TikTok はプロフィールヘッダー内の `[data-e2e="following-count"]` / `[data-e2e="followers-count"]` をクリックして
+  ///   公式のフォロー一覧モーダル（`[data-e2e="follow-info-popup"]`）を開く。
+  Future<void> openCurrentFollowList({required bool followers}) async {
+    final targetUser = currentTargetUsername;
+    if (targetUser == null || targetUser.isEmpty) return;
+    final platform = activePlatform;
+    if (platform == SnsPlatform.bluesky) {
+      final sub = followers ? 'followers' : 'follows';
+      open('https://bsky.app/profile/$targetUser/$sub');
+      return;
+    }
+    if (platform == SnsPlatform.instagram) {
+      final sub = followers ? 'followers' : 'following';
+      open('https://www.instagram.com/$targetUser/$sub/');
+      return;
+    }
+    if (platform == SnsPlatform.tiktok) {
+      final web = _current.web;
+      if (web == null) return;
+      final sel = followers
+          ? '[data-e2e="followers-count"], [data-e2e="followers"]'
+          : '[data-e2e="following-count"], [data-e2e="following"]';
+      try {
+        await web.evaluateJavascript(
+          source: '''
+          (function() {
+            const el = document.querySelector('$sel');
+            if (!el) return false;
+            const clickable = el.closest('div, button, a') || el;
+            clickable.click();
+            el.click();
+            return true;
+          })();
+          ''',
+        );
+      } catch (_) {}
+    }
   }
 
   /// 周辺スポットのアカウント一覧と最近開いたアカウント履歴を束ねて、前後のアカウントへワンタップで順送りする。
@@ -459,7 +577,7 @@ class SnsBrowserController extends ChangeNotifier {
     SnsPlatform platform, {
     List<NearbySnsTarget> nearbyTargets = const [],
   }) {
-    if (platform != SnsPlatform.instagram && platform != SnsPlatform.tiktok) return const [];
+    if (!SnsAccountSwitcher.supportsLoginSlots(platform)) return const [];
     final seen = <String>{};
     final out = <({SocialLink link, String? label})>[];
     for (final item in nearbyTargets) {
@@ -482,7 +600,11 @@ class SnsBrowserController extends ChangeNotifier {
     int delta, {
     List<NearbySnsTarget> nearbyTargets = const [],
   }) {
-    final platform = (_activePane == SnsPaneKind.tiktok) ? SnsPlatform.tiktok : SnsPlatform.instagram;
+    final platform = switch (_activePane) {
+      SnsPaneKind.tiktok => SnsPlatform.tiktok,
+      SnsPaneKind.bluesky => SnsPlatform.bluesky,
+      _ => SnsPlatform.instagram,
+    };
     final candidates = buildSwitchableTargets(platform, nearbyTargets: nearbyTargets);
     if (candidates.isEmpty) return false;
     final curUser = currentTargetUsername?.toLowerCase();
@@ -505,8 +627,11 @@ class SnsBrowserController extends ChangeNotifier {
     final web = pane.web;
     if (web == null) return null;
     final current = Uri.tryParse(pane.url ?? '');
-    final onTargetHost =
-        platform == SnsPlatform.tiktok ? _isTikTokHost(current) : _isInstagramHost(current);
+    final onTargetHost = switch (platform) {
+      SnsPlatform.tiktok => _isTikTokHost(current),
+      SnsPlatform.bluesky => _isBlueskyHost(current),
+      _ => _isInstagramHost(current),
+    };
     if (!onTargetHost) return null;
     return (
       readLocalStorage: () async {
@@ -520,7 +645,7 @@ class SnsBrowserController extends ChangeNotifier {
                   const k = localStorage.key(i);
                   if (!k) continue;
                   const v = localStorage.getItem(k);
-                  if (typeof v === 'string' && v.length <= 8192) out[k] = v;
+                  if (typeof v === 'string' && v.length <= 262144) out[k] = v;
                 }
                 return JSON.stringify(out);
               } catch (_) { return '{}'; }
@@ -547,11 +672,29 @@ class SnsBrowserController extends ChangeNotifier {
             (function() {
               try { sessionStorage.clear(); } catch (_) {}
               try {
-                localStorage.clear();
+                if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+                  navigator.serviceWorker.getRegistrations().then(function(rs) {
+                    rs.forEach(function(r) { try { r.unregister(); } catch (_) {} });
+                  }).catch(function() {});
+                }
+                if (window.caches && window.caches.keys) {
+                  window.caches.keys().then(function(ks) {
+                    ks.forEach(function(k) { try { window.caches.delete(k); } catch (_) {} });
+                  }).catch(function() {});
+                }
+              } catch (_) {}
+              try {
+                const setOrig = Storage.prototype.setItem;
+                const clearOrig = Storage.prototype.clear;
+                clearOrig.call(localStorage);
                 const data = $encoded;
                 for (const k of Object.keys(data)) {
-                  localStorage.setItem(k, data[k]);
+                  setOrig.call(localStorage, k, data[k]);
                 }
+                // 画面リロード時の beforeunload / pagehide による旧セッション上書きをブロックする
+                Storage.prototype.setItem = function() {};
+                Storage.prototype.removeItem = function() {};
+                Storage.prototype.clear = function() {};
               } catch (_) {}
             })();
             ''',
@@ -577,7 +720,11 @@ class SnsBrowserController extends ChangeNotifier {
   /// 自分のログイン中アカウントを次のスロットへワンタップ順送りする。
   Future<void> cycleLoginSlot([SnsPlatform? platform]) async {
     final targetPlatform = platform ??
-        (_activePane == SnsPaneKind.tiktok ? SnsPlatform.tiktok : SnsPlatform.instagram);
+        switch (_activePane) {
+          SnsPaneKind.tiktok => SnsPlatform.tiktok,
+          SnsPaneKind.bluesky => SnsPlatform.bluesky,
+          _ => SnsPlatform.instagram,
+        };
     if (accounts.slotsOf(targetPlatform).length <= 1) return;
     final pane = _pane(_paneKindForPlatform(targetPlatform));
     _setActivePane(pane.kind);
@@ -627,13 +774,15 @@ class SnsBrowserController extends ChangeNotifier {
       return;
     }
     final cur = Uri.tryParse(pane.url ?? '');
-    final onLoginPage = cur == null ||
-        (platform == SnsPlatform.instagram && _isInstagramLoginPath(cur)) ||
-        (platform == SnsPlatform.tiktok && _isTikTokLoginPath(cur));
-    if (onLoginPage || !pane.started) {
+    final onLoginOrInterstitial = cur == null ||
+        (platform == SnsPlatform.instagram && (_isInstagramLoginPath(cur) || _isInstagramOneTapPath(cur))) ||
+        (platform == SnsPlatform.tiktok && (_isTikTokLoginPath(cur) || isBlankTikTokSearchUri(cur)));
+    if (onLoginOrInterstitial || !pane.started) {
       _loadInPane(pane, SnsAccountSwitcher.homeUrlOf(platform));
     } else if (pane.web != null) {
-      pane.web!.reload();
+      // reload() よりも明示的な URL 再要求のほうが切替後の新 Cookie が初回リクエストから確実に適用される
+      final reloadUrl = pane.url ?? SnsAccountSwitcher.homeUrlOf(platform);
+      pane.web!.loadUrl(urlRequest: URLRequest(url: WebUri(reloadUrl)));
       notifyListeners();
     } else {
       _loadInPane(pane, pane.url ?? SnsAccountSwitcher.homeUrlOf(platform));
@@ -735,19 +884,11 @@ try {
 }
 ''';
 
-  /// TikTok Web 上でページ全体を再読込せずユーザー検索欄の更新と `/search/user?q=...` への SPA 遷移を行うスクリプト。
-  static const _tiktokSearchScript = r'''
+  /// Bluesky Web 上でページ全体を再読込せず `/search?q=...` への SPA 遷移を行うスクリプト。
+  static const _blueskySearchScript = r'''
 const before = location.href;
 try {
-  const input = document.querySelector('input[data-e2e="search-user-input"], form[action*="/search"] input, input[type="search"]');
-  if (input) {
-    const tracker = input._valueTracker;
-    if (tracker) tracker.setValue(input.value || '');
-    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-    if (setValue) setValue.call(input, query);
-    input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: query }));
-  }
-  const rel = '/search/user?q=' + encodeURIComponent(query);
+  const rel = '/search?q=' + encodeURIComponent(query);
   if (document.body) {
     const a = document.createElement('a');
     a.href = rel;
@@ -875,7 +1016,7 @@ return 'failed';
   const USERNAME_RE = IS_TIKTOK ? /^[A-Za-z0-9._]{1,32}$/ : /^[A-Za-z0-9._]{1,30}$/;
   const API_URL_RE = IS_TIKTOK
     ? /(\/api\/user\/list|\/user\/(follower|following)|\/aweme\/v\d+\/user\/(follower|following)|\/relations\/)/i
-    : /(\/api\/v1\/friendships\/|\/graphql|followers|following)/i;
+    : /(\/api\/v1\/friendships\/|\/api\/v1\/accounts\/|\/accounts\/login\/|\/graphql|followers|following)/i;
   const FRIENDSHIPS_LIST_RE = IS_TIKTOK
     ? /(\/api\/user\/list|\/user\/(follower|following)\/list|\/aweme\/v\d+\/user\/(follower|following)\/list)/i
     : /\/api\/v1\/friendships\/[^/?#]+\/(followers|following|mutual)/i;
@@ -967,6 +1108,16 @@ return 'failed';
     }
   }
 
+  function reportViewerUsername(u) {
+    if (!u || typeof u !== 'string') return;
+    const clean = u.trim().replace(/^@+/, '');
+    if (!USERNAME_RE.test(clean) || RESERVED.has(clean.toLowerCase())) return;
+    if (clean !== lastReportedViewer && window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
+      lastReportedViewer = clean;
+      window.flutter_inappwebview.callHandler('nearbyDetectedViewer', { p: PLATFORM, u: clean }).catch(() => {});
+    }
+  }
+
   function detectViewerUsername() {
     try {
       let viewer = '';
@@ -983,12 +1134,17 @@ return 'failed';
           }
         }
       } else {
-        const navLinks = document.querySelectorAll('nav a[href^="/"], [role="navigation"] a[href^="/"]');
-        for (const a of navLinks) {
-          const hasProfHint =
-            a.querySelector('img[alt*="プロフィール"], img[alt*="profile" i]') ||
-            /^(プロフィール|Profile)$/i.test((a.textContent || '').trim());
-          if (hasProfHint) {
+        // PC 版サイドナビ・モバイル版下部タブバーの両方から自分のプロフィールリンクを検出する
+        const allLinks = document.querySelectorAll('nav a[href^="/"], [role="navigation"] a[href^="/"], a[href^="/"]');
+        const winH = window.innerHeight || 800;
+        for (const a of allLinks) {
+          if (a.closest('article, [role="dialog"]')) continue;
+          const img = a.querySelector('img[alt*="プロフィール"], img[alt*="profile" i]');
+          const txt = (a.textContent || '').trim();
+          const inNav = !!a.closest('nav, [role="navigation"]');
+          const rect = (!inNav && img) ? a.getBoundingClientRect() : null;
+          const inBottomBar = !!(rect && rect.height > 0 && rect.height <= 64 && rect.top >= winH - 96);
+          if ((inNav && (img || /^(プロフィール|Profile)$/i.test(txt))) || inBottomBar) {
             const u = parseUsernameHref(a.getAttribute('href'));
             if (u) {
               viewer = u;
@@ -996,11 +1152,21 @@ return 'failed';
             }
           }
         }
+        if (!viewer) {
+          const scripts = document.querySelectorAll('script[type="application/json"]');
+          for (const s of scripts) {
+            const t = s.textContent || '';
+            if (t.length > 600000 || (t.indexOf('"viewer"') < 0 && t.indexOf('PolarisViewer') < 0)) continue;
+            const m = /"viewer"\s*:\s*\{[^{}]{0,600}?"username"\s*:\s*"([A-Za-z0-9._]{1,30})"/.exec(t) ||
+              /"PolarisViewer"[^{]{0,300}\{[^{}]{0,600}?"username"\s*:\s*"([A-Za-z0-9._]{1,30})"/.exec(t);
+            if (m && !RESERVED.has(m[1].toLowerCase())) {
+              viewer = m[1];
+              break;
+            }
+          }
+        }
       }
-      if (viewer && viewer !== lastReportedViewer && window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
-        lastReportedViewer = viewer;
-        window.flutter_inappwebview.callHandler('nearbyDetectedViewer', { p: PLATFORM, u: viewer }).catch(() => {});
-      }
+      if (viewer) reportViewerUsername(viewer);
     } catch (_) {}
   }
 
@@ -1077,6 +1243,9 @@ return 'failed';
       }
 
       if (IS_INSTAGRAM) {
+        if (node.logged_in_user && typeof node.logged_in_user === 'object' && typeof node.logged_in_user.username === 'string') {
+          reportViewerUsername(node.logged_in_user.username);
+        }
         if (Array.isArray(node.users) && ('next_max_id' in node || 'has_more' in node || 'big_list' in node)) {
           detectedMore = Boolean(node.next_max_id) || node.has_more === true;
         }
@@ -2021,7 +2190,11 @@ return 'failed';
         final map = args.first as Map;
         final pStr = (map['p'] as String?) ?? '';
         final uStr = (map['u'] as String?) ?? '';
-        final platform = pStr == 'tiktok' ? SnsPlatform.tiktok : SnsPlatform.instagram;
+        final platform = switch (pStr) {
+          'tiktok' => SnsPlatform.tiktok,
+          'bluesky' => SnsPlatform.bluesky,
+          _ => SnsPlatform.instagram,
+        };
         if (uStr.isNotEmpty) {
           await accounts.updateDetectedViewer(platform, uStr);
           await accounts.captureActiveSlot(platform, storage: _storageCallbacksFor(platform));
@@ -2116,6 +2289,10 @@ return 'failed';
       if (!accounts.switching) {
         unawaited(accounts.captureActiveSlot(SnsPlatform.tiktok, storage: _storageCallbacksFor(SnsPlatform.tiktok)));
       }
+    } else if (kind == SnsPaneKind.bluesky) {
+      if (!accounts.switching) {
+        unawaited(accounts.captureActiveSlot(SnsPlatform.bluesky, storage: _storageCallbacksFor(SnsPlatform.bluesky)));
+      }
     }
     unawaited(_syncFemaleFilterToPane(pane));
   }
@@ -2147,6 +2324,7 @@ class SnsBrowser extends StatelessWidget {
   static const _homes = {
     SnsPlatform.instagram: 'https://www.instagram.com/',
     SnsPlatform.tiktok: 'https://www.tiktok.com/',
+    SnsPlatform.bluesky: 'https://bsky.app/',
     SnsPlatform.x: 'https://x.com/home',
     SnsPlatform.facebook: 'https://www.facebook.com/',
     SnsPlatform.threads: 'https://www.threads.com/',
@@ -2177,9 +2355,12 @@ class SnsBrowser extends StatelessWidget {
       listenable: c,
       builder: (context, _) {
         final curPlatform = c.activePlatform;
-        final supportsJevAndSlots =
-            curPlatform == SnsPlatform.instagram || curPlatform == SnsPlatform.tiktok;
-        final switchableTargets = supportsJevAndSlots
+        final supportsSlots = SnsAccountSwitcher.supportsLoginSlots(curPlatform);
+        final supportsJev =
+            curPlatform == SnsPlatform.instagram ||
+            curPlatform == SnsPlatform.tiktok ||
+            curPlatform == SnsPlatform.bluesky;
+        final switchableTargets = supportsSlots
             ? c.buildSwitchableTargets(curPlatform, nearbyTargets: nearbyTargets)
             : const <({SocialLink link, String? label})>[];
 
@@ -2243,7 +2424,7 @@ class SnsBrowser extends StatelessWidget {
                             onPressed: () => c.stepTargetAccount(1, nearbyTargets: nearbyTargets),
                             icon: const Icon(Icons.chevron_right, size: 20),
                           ),
-                        if (supportsJevAndSlots)
+                        if (supportsSlots)
                           _LoginSlotSwitchButton(
                             controller: c,
                             platform: curPlatform,
@@ -2254,7 +2435,7 @@ class SnsBrowser extends StatelessWidget {
                               initialSectionLogin: true,
                             ),
                           ),
-                        if (supportsJevAndSlots)
+                        if (supportsJev)
                           _FemaleFilterToggleButton(
                             controller: c,
                             platform: curPlatform,
@@ -2376,7 +2557,18 @@ class SnsBrowser extends StatelessWidget {
                 },
               ),
             ),
-            if (supportsJevAndSlots && (c.jev.isActive || c.jev.totalApiCalls > 0))
+            if (curPlatform == SnsPlatform.instagram)
+              InstagramInstantSwitchBar(
+                controller: c,
+                nearbyTargets: nearbyTargets,
+                onOpenManager: () => showFastAccountSwitcherSheet(
+                  context,
+                  c,
+                  nearbyTargets: nearbyTargets,
+                  initialSectionLogin: true,
+                ),
+              ),
+            if (supportsJev && (c.jev.isActive || c.jev.totalApiCalls > 0))
               _JevUsageBar(
                 controller: c,
                 platform: curPlatform,
@@ -2463,7 +2655,274 @@ class _PlatformQuickSwitchPills extends StatelessWidget {
             selected: active == SnsPaneKind.tiktok,
             tooltip: 'TikTok へ即時切り替え（画面保持）',
           ),
+          pill(
+            platform: SnsPlatform.bluesky,
+            selected: active == SnsPaneKind.bluesky,
+            tooltip: 'Bluesky へ即時切り替え（画面保持）',
+          ),
         ],
+      ),
+    );
+  }
+}
+
+/// Instagram 画面上部に常設するワンタップ瞬時アカウント切り替えバー。
+/// - 左側（横スクロール）: 自分の複数 Instagram ログイン垢をメニュー不要・1タップで即座にセッション切り替え＋別垢追加
+/// - 右側（固定）: スマホ縦画面でも隠れない、周辺スポット・閲覧履歴の Instagram アカウント SPA 瞬時順送りボタン
+class InstagramInstantSwitchBar extends StatelessWidget {
+  const InstagramInstantSwitchBar({
+    super.key,
+    required this.controller,
+    this.nearbyTargets = const [],
+    this.onOpenManager,
+  });
+
+  static const _igColor = Color(0xFFDD2A7B);
+
+  final SnsBrowserController controller;
+  final List<NearbySnsTarget> nearbyTargets;
+  final VoidCallback? onOpenManager;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = controller;
+    return ListenableBuilder(
+      listenable: c,
+      builder: (context, _) {
+        final scheme = Theme.of(context).colorScheme;
+        final text = Theme.of(context).textTheme;
+        final switcher = c.accounts;
+        final slots = switcher.slotsOf(SnsPlatform.instagram);
+        final activeSlot = switcher.activeSlotOf(SnsPlatform.instagram);
+        final targets = c.buildSwitchableTargets(SnsPlatform.instagram, nearbyTargets: nearbyTargets);
+        final curTarget = c.currentTargetUsername?.toLowerCase();
+        final curTargetIdx = curTarget == null
+            ? -1
+            : targets.indexWhere((t) => t.link.username?.toLowerCase() == curTarget);
+
+        return Material(
+          color: scheme.surfaceContainerLow,
+          child: Container(
+            height: 36,
+            decoration: BoxDecoration(
+              border: Border(bottom: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.6))),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    child: Row(
+                      children: [
+                        if (slots.length >= 2)
+                          Padding(
+                            padding: const EdgeInsets.only(right: 6),
+                            child: Tooltip(
+                              message: '次の Instagram ログインアカウントへ瞬時に切り替え',
+                              child: InkWell(
+                                key: const ValueKey('ig_instant_cycle_btn'),
+                                borderRadius: BorderRadius.circular(14),
+                                onTap: switcher.switching
+                                    ? null
+                                    : () => c.cycleLoginSlot(SnsPlatform.instagram),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                                  alignment: Alignment.center,
+                                  decoration: BoxDecoration(
+                                    gradient: instagramGradient,
+                                    borderRadius: BorderRadius.circular(14),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      if (switcher.switching)
+                                        const SizedBox(
+                                          width: 11,
+                                          height: 11,
+                                          child: CircularProgressIndicator(strokeWidth: 1.8, color: Colors.white),
+                                        )
+                                      else
+                                        const Icon(Icons.swap_horiz, size: 15, color: Colors.white),
+                                      const SizedBox(width: 3),
+                                      Text(
+                                        '垢切替',
+                                        style: text.labelSmall?.copyWith(
+                                          color: Colors.white,
+                                          fontWeight: FontWeight.w700,
+                                          fontSize: 11,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        for (final slot in slots)
+                          Padding(
+                            padding: const EdgeInsets.only(right: 5),
+                            child: _buildSlotPill(
+                              context,
+                              slot: slot,
+                              isActive: slot.id == activeSlot.id,
+                              switching: switcher.switching,
+                            ),
+                          ),
+                        Tooltip(
+                          message: '別の Instagram アカウントを追加してログイン',
+                          child: InkWell(
+                            key: const ValueKey('ig_instant_add_slot_btn'),
+                            borderRadius: BorderRadius.circular(14),
+                            onTap: switcher.switching
+                                ? null
+                                : () => c.addLoginSlot(SnsPlatform.instagram),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8),
+                              alignment: Alignment.center,
+                              decoration: BoxDecoration(
+                                color: scheme.surface,
+                                borderRadius: BorderRadius.circular(14),
+                                border: Border.all(color: scheme.outlineVariant),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(Icons.person_add_alt_1_outlined, size: 13, color: scheme.primary),
+                                  const SizedBox(width: 3),
+                                  Text(
+                                    '別垢追加',
+                                    style: text.labelSmall?.copyWith(
+                                      color: scheme.primary,
+                                      fontWeight: FontWeight.w600,
+                                      fontSize: 11,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                if (targets.isNotEmpty) ...[
+                  VerticalDivider(width: 1, indent: 6, endIndent: 6, color: scheme.outlineVariant),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 4),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          key: const ValueKey('ig_prev_target_btn'),
+                          tooltip: '前の Instagram アカウントへ瞬時移動',
+                          visualDensity: VisualDensity.compact,
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(minWidth: 26, minHeight: 28),
+                          onPressed: () => c.stepTargetAccount(-1, nearbyTargets: nearbyTargets),
+                          icon: const Icon(Icons.chevron_left, size: 19),
+                        ),
+                        GestureDetector(
+                          onTap: onOpenManager,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 2),
+                            child: Text(
+                              curTargetIdx >= 0 ? '${curTargetIdx + 1}/${targets.length}' : '巡回${targets.length}',
+                              style: text.labelSmall?.copyWith(
+                                fontSize: 10.5,
+                                color: scheme.onSurfaceVariant,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ),
+                        IconButton(
+                          key: const ValueKey('ig_next_target_btn'),
+                          tooltip: '次の Instagram アカウントへ瞬時移動',
+                          visualDensity: VisualDensity.compact,
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(minWidth: 26, minHeight: 28),
+                          onPressed: () => c.stepTargetAccount(1, nearbyTargets: nearbyTargets),
+                          icon: const Icon(Icons.chevron_right, size: 19),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildSlotPill(
+    BuildContext context, {
+    required SnsAccountSlot slot,
+    required bool isActive,
+    required bool switching,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+    final text = Theme.of(context).textTheme;
+    return Tooltip(
+      message: isActive
+          ? '${slot.displayTitle}（使用中 · タップで管理）'
+          : '${slot.displayTitle} へワンタップで瞬時切り替え',
+      child: InkWell(
+        key: ValueKey('ig_slot_${slot.id}'),
+        borderRadius: BorderRadius.circular(14),
+        onTap: switching
+            ? null
+            : () {
+                if (!isActive) {
+                  controller.switchLoginSlot(SnsPlatform.instagram, slot.id);
+                } else if (!slot.hasSavedSession) {
+                  controller.open(SnsAccountSwitcher.loginUrlOf(SnsPlatform.instagram));
+                } else {
+                  onOpenManager?.call();
+                }
+              },
+        onLongPress: onOpenManager,
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 136),
+          padding: const EdgeInsets.symmetric(horizontal: 9),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: isActive ? _igColor.withValues(alpha: 0.14) : scheme.surface,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: isActive ? _igColor : scheme.outlineVariant,
+              width: isActive ? 1.4 : 1,
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                isActive
+                    ? Icons.check_circle
+                    : (slot.hasSavedSession ? Icons.account_circle_outlined : Icons.login),
+                size: 13,
+                color: isActive ? _igColor : scheme.onSurfaceVariant,
+              ),
+              const SizedBox(width: 4),
+              Flexible(
+                child: Text(
+                  slot.shortBadge,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: text.labelSmall?.copyWith(
+                    fontSize: 11,
+                    color: isActive ? _igColor : scheme.onSurface,
+                    fontWeight: isActive ? FontWeight.w700 : FontWeight.w500,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -2868,9 +3327,11 @@ class _FastAccountSwitcherSheet extends StatefulWidget {
 }
 
 class _FastAccountSwitcherSheetState extends State<_FastAccountSwitcherSheet> {
-  late SnsPlatform _platform = widget.controller.activePlatform == SnsPlatform.tiktok
-      ? SnsPlatform.tiktok
-      : SnsPlatform.instagram;
+  late SnsPlatform _platform = switch (widget.controller.activePlatform) {
+    SnsPlatform.tiktok => SnsPlatform.tiktok,
+    SnsPlatform.bluesky => SnsPlatform.bluesky,
+    _ => SnsPlatform.instagram,
+  };
   final TextEditingController _jumpInput = TextEditingController();
 
   @override
@@ -2973,6 +3434,11 @@ class _FastAccountSwitcherSheetState extends State<_FastAccountSwitcherSheet> {
                                 value: SnsPlatform.tiktok,
                                 icon: FaIcon(SnsPlatform.tiktok.icon, size: 14),
                                 label: const Text('TikTok'),
+                              ),
+                              ButtonSegment(
+                                value: SnsPlatform.bluesky,
+                                icon: FaIcon(SnsPlatform.bluesky.icon, size: 14),
+                                label: const Text('Bluesky'),
                               ),
                             ],
                             selected: {_platform},
@@ -3497,6 +3963,9 @@ class _SinglePaneWebView extends StatelessWidget {
         ),
       ]),
       initialSettings: InAppWebViewSettings(
+        userAgent: kind == SnsPaneKind.tiktok
+            ? SnsBrowserController.desktopChromeUserAgent
+            : (Platform.isAndroid ? SnsBrowserController.mobileCleanChromeUserAgent : null),
         thirdPartyCookiesEnabled: true,
         useShouldOverrideUrlLoading: true,
         mediaPlaybackRequiresUserGesture: true,

@@ -131,133 +131,6 @@ class _Badge extends StatelessWidget {
   }
 }
 
-class PlaceTile extends StatelessWidget {
-  const PlaceTile({
-    super.key,
-    required this.place,
-    required this.category,
-    required this.selected,
-    required this.onTap,
-    required this.onOpenLink,
-    this.platforms,
-    this.isHidden = false,
-    this.onToggleHidden,
-    this.onSearchInstagram,
-  });
-
-  static const height = 76.0;
-
-  final Place place;
-  final PlaceCategory category;
-  final bool selected;
-  final VoidCallback onTap;
-  final OpenLink onOpenLink;
-  final Set<SnsPlatform>? platforms;
-  final bool isHidden;
-  final ValueChanged<bool>? onToggleHidden;
-  final ValueChanged<String>? onSearchInstagram;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final text = Theme.of(context).textTheme;
-    final listing = place.listing;
-    final event = place.event;
-    final link = place.primaryLink(platforms);
-    final (String? subtitle, Color? subtitleColor) = switch (place) {
-      _ when listing != null => (
-          [listing.organizer, listing.fee, listing.schedule].whereType<String>().join(' · '),
-          null
-        ),
-      _ when event != null => (
-          [
-            if (event.venue case final v?) '開催地: $v' else if (place.address case final a?) '開催地: $a',
-            event.schedule,
-            event.fee,
-          ].whereType<String>().join(' · '),
-          null
-        ),
-      _ when link != null => (
-          [link.handle, if (place.links.length > 1) '他 ${place.links.length - 1} 件'].join('  '),
-          link.platform.color
-        ),
-      _ => (place.address, null),
-    };
-    // 種類ごとに 1 つずつ、最大 2〜3 つのボタンを並べる
-    final buttons = <SocialLink>[];
-    for (final l in place.sortedLinks) {
-      if (buttons.length < 2 && !buttons.any((b) => b.platform == l.platform)) buttons.add(l);
-    }
-    final hasInstagram = place.links.any((l) => l.platform == SnsPlatform.instagram);
-    return Material(
-      color: selected ? scheme.primaryContainer.withValues(alpha: 0.6) : Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        child: Padding(
-          padding: EdgeInsets.only(left: onToggleHidden != null ? 4 : 16, right: 6),
-          child: Row(
-            children: [
-              if (onToggleHidden case final toggle?)
-                Tooltip(
-                  message: isHidden ? 'チェックを外して地図に再表示' : 'チェックを付けて地図から非表示',
-                  child: Checkbox(
-                    value: isHidden,
-                    visualDensity: VisualDensity.compact,
-                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    onChanged: (v) => toggle(v ?? false),
-                  ),
-                ),
-              PlaceAvatar(place: place, category: category, size: 42, platforms: platforms),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(place.name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: text.titleSmall?.copyWith(fontWeight: FontWeight.w600)),
-                    if (subtitle != null && subtitle.isNotEmpty)
-                      Text(subtitle,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: text.bodySmall?.copyWith(color: subtitleColor ?? scheme.onSurfaceVariant)),
-                    Text(
-                      [
-                        ?place.kind,
-                        if (place.audience != Audience.none) place.audience.label,
-                        formatDistance(place.distanceMeters),
-                      ].join(' · '),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
-                    ),
-                  ],
-                ),
-              ),
-              for (final b in buttons)
-                IconButton(
-                  tooltip: '${b.platform.label} で開く（${b.handle}）',
-                  visualDensity: VisualDensity.compact,
-                  icon: FaIcon(b.platform.icon, size: 18, color: b.platform.color),
-                  onPressed: () => onOpenLink(b.url),
-                ),
-              if (!hasInstagram && !place.isListing && onSearchInstagram != null)
-                IconButton(
-                  tooltip: 'Instagram で「${place.searchQuery}」を検索',
-                  visualDensity: VisualDensity.compact,
-                  icon: Icon(Icons.person_search_outlined, size: 20, color: SnsPlatform.instagram.color),
-                  onPressed: () => onSearchInstagram!(place.searchQuery),
-                ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 /// 詳細カード内の SNS アカウント 1 件（見つけた場所も添える）。
 class _SnsRow extends StatelessWidget {
   const _SnsRow({required this.link, required this.onOpenLink});
@@ -299,6 +172,9 @@ class PlaceDetailCard extends StatelessWidget {
     required this.onOpenLink,
     this.platforms,
     this.onSearchInstagram,
+    this.onSearchTikTok,
+    this.onPrevPlace,
+    this.onNextPlace,
     this.isHidden = false,
     this.onToggleHidden,
     this.onEdit,
@@ -313,6 +189,14 @@ class PlaceDetailCard extends StatelessWidget {
 
   /// Instagram でアカウントを検索する（引数は検索語）。
   final ValueChanged<String>? onSearchInstagram;
+
+  /// TikTok でアカウントを検索する（引数は検索語）。
+  final ValueChanged<String>? onSearchTikTok;
+
+  /// 前後のスポットへ高速切り替えするコールバック。
+  final VoidCallback? onPrevPlace;
+  final VoidCallback? onNextPlace;
+
   final bool isHidden;
   final ValueChanged<bool>? onToggleHidden;
   final VoidCallback? onEdit;
@@ -325,6 +209,11 @@ class PlaceDetailCard extends StatelessWidget {
     final listing = place.listing;
     final event = place.event;
     final link = place.primaryLink(platforms) ?? place.primaryLink();
+    final secondarySnsLinks = [
+      for (final l in place.sortedLinks)
+        if (link == null || l.platform != link.platform)
+          if (l.platform == SnsPlatform.instagram || l.platform == SnsPlatform.tiktok) l,
+    ];
     final description = listing?.description ?? event?.description;
     final details = <(IconData, String)>[
       if (event?.venue case final v?) (Icons.location_on_outlined, '開催地: $v'),
@@ -388,6 +277,12 @@ class PlaceDetailCard extends StatelessWidget {
                           icon: FaIcon(link.platform.icon, size: 16),
                           label: Text('${link.platform.label} で開く'),
                         ),
+                      for (final sec in secondarySnsLinks.take(1))
+                        FilledButton.tonalIcon(
+                          onPressed: () => onOpenLink(sec.url),
+                          icon: FaIcon(sec.platform.icon, size: 15, color: sec.platform.color),
+                          label: Text('${sec.platform.label} で開く'),
+                        ),
                       if (place.website case final url?)
                         place.isGathering && link == null
                             ? FilledButton.icon(
@@ -407,6 +302,12 @@ class PlaceDetailCard extends StatelessWidget {
                           onPressed: () => onSearchInstagram!(place.searchQuery),
                           icon: FaIcon(SnsPlatform.instagram.icon, size: 16),
                           label: const Text('Instagram で探す'),
+                        ),
+                      if (!place.isListing && onSearchTikTok != null)
+                        TextButton.icon(
+                          onPressed: () => onSearchTikTok!(place.searchQuery),
+                          icon: FaIcon(SnsPlatform.tiktok.icon, size: 15),
+                          label: const Text('TikTok で探す'),
                         ),
                       if (onToggleHidden case final toggle?)
                         FilterChip(
@@ -449,7 +350,34 @@ class PlaceDetailCard extends StatelessWidget {
                 ],
               ),
             ),
-            IconButton(onPressed: onClose, icon: const Icon(Icons.close), tooltip: '閉じる'),
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(onPressed: onClose, icon: const Icon(Icons.close), tooltip: '閉じる'),
+                if (onPrevPlace != null || onNextPlace != null)
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        tooltip: '前のスポット',
+                        visualDensity: VisualDensity.compact,
+                        constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
+                        padding: EdgeInsets.zero,
+                        onPressed: onPrevPlace,
+                        icon: const Icon(Icons.chevron_left, size: 20),
+                      ),
+                      IconButton(
+                        tooltip: '次のスポット',
+                        visualDensity: VisualDensity.compact,
+                        constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
+                        padding: EdgeInsets.zero,
+                        onPressed: onNextPlace,
+                        icon: const Icon(Icons.chevron_right, size: 20),
+                      ),
+                    ],
+                  ),
+              ],
+            ),
           ],
         ),
       ),

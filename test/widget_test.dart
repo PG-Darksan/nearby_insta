@@ -19,6 +19,7 @@ import 'package:nearby_insta/services/listing_store.dart';
 import 'package:nearby_insta/services/overpass_service.dart';
 import 'package:nearby_insta/services/place_repository.dart';
 import 'package:nearby_insta/services/search_history.dart';
+import 'package:nearby_insta/services/sns_account_switcher.dart';
 import 'package:nearby_insta/services/sns_finder.dart';
 import 'package:nearby_insta/services/spot_data_service.dart';
 import 'package:nearby_insta/widgets/place_widgets.dart';
@@ -794,7 +795,7 @@ void main() {
     expect(find.text('対象'), findsOneWidget);
   });
 
-  testWidgets('一覧のチェックで個別非表示・再表示でき、ワンタップで Instagram 検索を呼べる', (tester) async {
+  testWidgets('地図の詳細カードから個別非表示・再表示でき、ワンタップで Instagram 検索を呼べる', (tester) async {
     final c = NearbyController(
       repository: _FakePlaceRepository([
         {
@@ -825,18 +826,14 @@ void main() {
               children: [
                 SearchFilters(controller: c),
                 for (final p in c.visiblePlaces)
-                  SizedBox(
-                    height: PlaceTile.height,
-                    child: PlaceTile(
-                      place: p,
-                      category: p.primaryCategory(c.enabled),
-                      selected: false,
-                      onTap: () {},
-                      onOpenLink: (_) {},
-                      isHidden: c.isHidden(p.id),
-                      onToggleHidden: (hide) => c.setHidden(p, hide),
-                      onSearchInstagram: (q) => searchedQuery = q,
-                    ),
+                  PlaceDetailCard(
+                    place: p,
+                    category: p.primaryCategory(c.enabled),
+                    onClose: () {},
+                    onOpenLink: (_) {},
+                    isHidden: c.isHidden(p.id),
+                    onToggleHidden: (hide) => c.setHidden(p, hide),
+                    onSearchInstagram: (q) => searchedQuery = q,
                   ),
               ],
             ),
@@ -847,13 +844,13 @@ void main() {
 
     expect(find.text('カフェ六浦'), findsOneWidget);
 
-    // 一覧の Instagram 検索ボタンからワンタップで検索語が渡る
-    await tester.tap(find.byIcon(Icons.person_search_outlined));
+    // 詳細カードの「Instagram で探す」ボタンからワンタップで検索語が渡る
+    await tester.tap(find.text('Instagram で探す'));
     await tester.pump();
     expect(searchedQuery, 'カフェ六浦');
 
-    // チェックボックスを押すと非表示になり、「チェックして非表示にした場所（1件）」ボタンが出る
-    await tester.tap(find.byType(Checkbox));
+    // 「非表示にする」を押すと地図から非表示になり、「チェックして非表示にした場所（1件）」ボタンが出る
+    await tester.tap(find.text('非表示にする'));
     await tester.pump();
     expect(find.text('カフェ六浦'), findsNothing);
     expect(find.text('チェックして非表示にした場所（1件）'), findsOneWidget);
@@ -1068,11 +1065,26 @@ void main() {
       expect(jev.totalCostUsd, 0.0);
       expect(jev.totalInputTokens, 0);
 
-      // 注入スクリプトにアイコン抽出・女性専用表示ルールが含まれる
+      // 注入スクリプトにアイコン抽出・女性専用表示・自動次ページ取得・再取得行の即時保護とリサイクル検知が含まれる
       expect(SnsBrowserController.followerFilterScript, contains('extractAvatar'));
       expect(SnsBrowserController.followerFilterScript, contains('nearbyCheckAccounts'));
       expect(SnsBrowserController.followerFilterScript, contains('nearbyFollowListState'));
+      expect(SnsBrowserController.followerFilterScript, contains('nearbyGetFilterConfig'));
       expect(SnsBrowserController.followerFilterScript, contains('nearby-jev-female-only'));
+      expect(SnsBrowserController.followerFilterScript, contains('hookNetwork'));
+      expect(SnsBrowserController.followerFilterScript, contains('XMLHttpRequest'));
+      expect(SnsBrowserController.followerFilterScript, contains('reconcileMarkedRows'));
+      expect(SnsBrowserController.followerFilterScript, contains('maybeAutoFetchNextPage'));
+      expect(SnsBrowserController.followerFilterScript, contains('triggerPaginationPulse'));
+      expect(SnsBrowserController.followerFilterScript, contains('nearby-jev-spacer'));
+      expect(
+        SnsBrowserController.followerFilterScript,
+        contains('html.nearby-jev-female-only [data-nearby-jev-pending="1"]'),
+      );
+      expect(
+        SnsBrowserController.followerFilterScript,
+        isNot(contains('opacity: 0.45')),
+      );
     });
 
     testWidgets('Jev 設定ダイアログでアイコン付き接続テスト・費用表示・API キー保存ができる', (tester) async {
@@ -1199,6 +1211,300 @@ void main() {
       expect(_ids(places.single.links), ['instagram:shibuya_bundled_cafe']);
     });
   });
+
+  group('TikTok のフォロー中・フォロワー Jev 女性判定対応', () {
+    test('TikTok アカウント候補の CDN 署名除外・キャッシュ分離・プロンプト構築・Referer 付与', () async {
+      const ttA = InstagramAccountCandidate(
+        username: 'aoi_dance_03',
+        displayName: '葵',
+        platform: 'tiktok',
+        avatarUrl: 'https://p16-sign-va.tiktokcdn.com/tos-maliva-avt-0068/73123abc/100x100.jpeg?x-expires=111&x-signature=aaa',
+      );
+      const ttASameAvatarNewSig = InstagramAccountCandidate(
+        username: 'aoi_dance_03',
+        displayName: '葵',
+        platform: 'tiktok',
+        avatarUrl: 'https://p16-sign-va.tiktokcdn.com/tos-maliva-avt-0068/73123abc/100x100.jpeg?x-expires=999&x-signature=zzz',
+      );
+      const igSameHandle = InstagramAccountCandidate(
+        username: 'aoi_dance_03',
+        displayName: '葵',
+        avatarUrl: 'https://p16-sign-va.tiktokcdn.com/tos-maliva-avt-0068/73123abc/100x100.jpeg',
+      );
+
+      expect(ttA.isTikTok, isTrue);
+      expect(ttA.avatarId, '73123abc_100x100.jpeg');
+      expect(ttA.cacheKey, ttASameAvatarNewSig.cacheKey);
+      expect(ttA.cacheKey, startsWith('tt:'));
+      expect(igSameHandle.cacheKey, isNot(startsWith('tt:')));
+
+      final body = JevService.buildRequestBody([ttA]);
+      expect(body['state'] as String, contains('TikTok'));
+      final q0 = (body['questions'] as Map)['q_0'] as Map;
+      expect(q0['instructions'] as String, contains('personal TikTok account?'));
+
+      String? capturedReferer;
+      final refererCheckClient = MockClient((req) async {
+        capturedReferer = req.headers['Referer'];
+        return http.Response.bytes(JevService.makeSolidPng(width: 64, height: 64), 200);
+      });
+      final prepared = await JevService.defaultPrepareAvatar(
+        'https://p16-sign-sg.tiktokcdn.com/aweme/100x100/tos-alisg-avt-0068/abc.jpeg',
+        refererCheckClient,
+      );
+      expect(capturedReferer, 'https://www.tiktok.com/');
+      expect(prepared, isNotNull);
+      expect(prepared!.format, 'png');
+
+      // WebView 注入スクリプトに TikTok のフォロー中・フォロワー検出と API フックが含まれる
+      expect(SnsBrowserController.followerFilterScript, contains('IS_TIKTOK'));
+      expect(SnsBrowserController.followerFilterScript, contains('follow-info-popup'));
+      expect(SnsBrowserController.followerFilterScript, contains(r'\/api\/user\/list'));
+      expect(SnsBrowserController.followerFilterScript, contains('uniqueId'));
+      expect(SnsBrowserController.followerFilterScript, contains('nearbyDetectedViewer'));
+    });
+  });
+
+  group('Instagram・TikTok のアカウント高速切り替え（ログイン垢切替＋画面並列保持・順送り）', () {
+    test('SnsAccountSwitcher: 複数の Instagram / TikTok ログインセッションを互いに干渉せず即時切り替え・永続化できる', () async {
+      final tempDir = await Directory.systemTemp.createTemp('nearby_insta_acc_test_');
+      addTearDown(() async {
+        if (await tempDir.exists()) await tempDir.delete(recursive: true);
+      });
+      final storageFile = File('${tempDir.path}/sns_accounts_v1.json');
+      final cookieStore = _FakeBrowserCookieStore();
+
+      // 初期状態で Instagram にメイン垢、TikTok にメイン垢の Cookie が入っている想定
+      cookieStore.jar[SnsPlatform.instagram] = [
+        SavedCookie(
+          name: 'sessionid',
+          value: 'ig_session_main',
+          domain: '.instagram.com',
+          // Windows WebView2 の秒単位 expiresDate もミリ秒へ正規化されることを検証
+          expiresDateMs: SavedCookie.normalizeExpiresMs(1893456000),
+        ),
+      ];
+      cookieStore.jar[SnsPlatform.tiktok] = [
+        const SavedCookie(
+          name: 'sid_tt',
+          value: 'tt_session_main',
+          domain: '.tiktok.com',
+        ),
+      ];
+
+      var igLocalStorage = <String, String>{'ig_theme': 'dark', 'viewer': 'main_ig'};
+      final storageCallbacks = (
+        readLocalStorage: () async => {...igLocalStorage},
+        replaceStorage: (Map<String, String> next) async {
+          igLocalStorage = {...next};
+        },
+      );
+
+      final switcher = SnsAccountSwitcher(cookieStore: cookieStore, storageFile: storageFile);
+      await switcher.ensureLoaded();
+      await switcher.updateDetectedViewer(SnsPlatform.instagram, '@main_ig');
+      expect(switcher.activeSlotOf(SnsPlatform.instagram).displayTitle, 'アカウント 1 (@main_ig)');
+
+      // Instagram の 2 つ目のログインスロットを追加すると、スロット 1 の Cookie が退避され Instagram だけ空になる
+      final added = await switcher.addNewAccountSlot(
+        SnsPlatform.instagram,
+        customLabel: 'サブ垢',
+        storage: storageCallbacks,
+      );
+      expect(added.loginUrl, 'https://www.instagram.com/accounts/login/');
+      expect(switcher.slotsOf(SnsPlatform.instagram).length, 2);
+      expect(cookieStore.jar[SnsPlatform.instagram], isEmpty);
+      expect(igLocalStorage, isEmpty);
+      // TikTok 側のログイン Cookie は一切消えていないこと
+      expect(cookieStore.jar[SnsPlatform.tiktok]!.single.value, 'tt_session_main');
+
+      // サブ垢でログインした状態を模擬
+      cookieStore.jar[SnsPlatform.instagram] = [
+        const SavedCookie(name: 'sessionid', value: 'ig_session_sub', domain: '.instagram.com'),
+      ];
+      igLocalStorage = {'viewer': 'sub_ig'};
+      await switcher.updateDetectedViewer(SnsPlatform.instagram, 'sub_ig');
+      await switcher.captureActiveSlot(SnsPlatform.instagram, storage: storageCallbacks);
+
+      // ワンタップ（cycleNextSlot）でスロット 1 (@main_ig) に戻すと Cookie と localStorage が即座に復元される
+      final recUrl = await switcher.cycleNextSlot(SnsPlatform.instagram, storage: storageCallbacks);
+      expect(recUrl, isNull); // ログイン済みセッションがあるためログイン画面へ飛ばさない
+      expect(switcher.activeSlotOf(SnsPlatform.instagram).username, 'main_ig');
+      expect(cookieStore.jar[SnsPlatform.instagram]!.single.value, 'ig_session_main');
+      expect(cookieStore.jar[SnsPlatform.instagram]!.single.expiresDateMs, 1893456000 * 1000);
+      expect(igLocalStorage['viewer'], 'main_ig');
+
+      // ファイルから再読み込みしてもスロットとピン留め履歴が復元される
+      await switcher.recordVisitedTarget(SnsPlatform.tiktok, '@shibuya_cafe', label: '渋谷カフェ');
+      await switcher.togglePinTarget(SnsPlatform.tiktok, 'shibuya_cafe');
+
+      final reloaded = SnsAccountSwitcher(cookieStore: cookieStore, storageFile: storageFile);
+      await reloaded.ensureLoaded();
+      expect(reloaded.slotsOf(SnsPlatform.instagram).length, 2);
+      expect(reloaded.activeSlotOf(SnsPlatform.instagram).username, 'main_ig');
+      expect(reloaded.recentTargetsOf(SnsPlatform.tiktok).single.pinned, isTrue);
+      expect(reloaded.recentTargetsOf(SnsPlatform.tiktok).single.label, '渋谷カフェ');
+    });
+
+    test('SnsBrowserController: Instagram ⇄ TikTok の並列ペイン保持・TikTok 高速検索・前後アカウント順送り', () {
+      final accounts = SnsAccountSwitcher(inMemoryOnly: true);
+      final jev = JevService(inMemoryOnly: true);
+      final browser = SnsBrowserController(jev: jev, accounts: accounts);
+      addTearDown(browser.dispose);
+
+      // Instagram プロフィールを開く
+      browser.open('https://www.instagram.com/cafe_one/', label: 'カフェ1');
+      expect(browser.activePane, SnsPaneKind.instagram);
+      expect(browser.activePlatform, SnsPlatform.instagram);
+      expect(browser.currentTargetUsername, 'cafe_one');
+
+      // TikTok 検索に切り替えても Instagram ペインの状態は保持される
+      browser.searchTikTok('渋谷 カフェ');
+      expect(browser.activePane, SnsPaneKind.tiktok);
+      expect(browser.activePlatform, SnsPlatform.tiktok);
+      expect(browser.url, contains('tiktok.com/search/user?q='));
+
+      // Instagram へワンタップで戻すと、先ほど開いていた @cafe_one のまま即座に復帰する
+      browser.switchPlatform(SnsPlatform.instagram);
+      expect(browser.activePane, SnsPaneKind.instagram);
+      expect(browser.url, 'https://www.instagram.com/cafe_one/');
+      expect(browser.currentTargetUsername, 'cafe_one');
+
+      // 周辺スポット候補を使って前後のアカウントへワンタップ順送り
+      final nearby = <NearbySnsTarget>[
+        (link: const SocialLink(SnsPlatform.instagram, 'cafe_one'), placeName: 'カフェ1'),
+        (link: const SocialLink(SnsPlatform.instagram, 'cafe_two'), placeName: 'カフェ2'),
+        (link: const SocialLink(SnsPlatform.instagram, 'cafe_three'), placeName: 'カフェ3'),
+      ];
+      expect(browser.stepTargetAccount(1, nearbyTargets: nearby), isTrue);
+      expect(browser.currentTargetUsername, 'cafe_two');
+      expect(browser.stepTargetAccount(1, nearbyTargets: nearby), isTrue);
+      expect(browser.currentTargetUsername, 'cafe_three');
+      expect(browser.stepTargetAccount(-1, nearbyTargets: nearby), isTrue);
+      expect(browser.currentTargetUsername, 'cafe_two');
+    });
+
+    testWidgets('PlaceDetailCard から TikTok で探す・スポット前後切り替えが呼べる', (tester) async {
+      final place = Place(
+        id: 'node/55',
+        name: 'カフェ渋谷',
+        position: const LatLng(35.659, 139.700),
+        categories: {PlaceCategory.restaurant, PlaceCategory.sns},
+        links: const [
+          SocialLink(SnsPlatform.instagram, 'shibuya_ig'),
+          SocialLink(SnsPlatform.tiktok, 'shibuya_tt'),
+        ],
+      );
+      String? igQuery;
+      String? ttQuery;
+      var steppedNext = 0;
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: PlaceDetailCard(
+              place: place,
+              category: PlaceCategory.sns,
+              onClose: () {},
+              onOpenLink: (_) {},
+              onSearchInstagram: (q) => igQuery = q,
+              onSearchTikTok: (q) => ttQuery = q,
+              onNextPlace: () => steppedNext++,
+            ),
+          ),
+        ),
+      ));
+
+      expect(find.text('Instagram で開く'), findsOneWidget);
+      expect(find.text('TikTok で開く'), findsOneWidget);
+      expect(find.text('TikTok で探す'), findsOneWidget);
+
+      await tester.tap(find.text('Instagram で探す'));
+      await tester.pump();
+      expect(igQuery, 'カフェ渋谷');
+
+      await tester.tap(find.text('TikTok で探す'));
+      await tester.pump();
+      expect(ttQuery, 'カフェ渋谷');
+
+      await tester.tap(find.byTooltip('次のスポット'));
+      await tester.pump();
+      expect(steppedNext, 1);
+    });
+
+    testWidgets('showFastAccountSwitcherSheet で 360px 幅でもオーバーフローせずアカウント切替・直接ジャンプができる', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(360, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final cookieStore = _FakeBrowserCookieStore();
+      final accounts = SnsAccountSwitcher(inMemoryOnly: true, cookieStore: cookieStore);
+      final jev = JevService(inMemoryOnly: true);
+      final browser = SnsBrowserController(jev: jev, accounts: accounts);
+      addTearDown(browser.dispose);
+
+      await accounts.ensureLoaded();
+      cookieStore.jar[SnsPlatform.tiktok] = const [
+        SavedCookie(name: 'sessionid', value: 'tt_main', domain: '.tiktok.com'),
+      ];
+      await accounts.updateDetectedViewer(SnsPlatform.tiktok, 'my_tiktok_main');
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (context) => ElevatedButton(
+              onPressed: () => showFastAccountSwitcherSheet(
+                context,
+                browser,
+                nearbyTargets: const [
+                  (link: SocialLink(SnsPlatform.tiktok, 'shibuya_dance'), placeName: '渋谷スタジオ'),
+                ],
+                initialSectionLogin: true,
+              ),
+              child: const Text('切替シートを開く'),
+            ),
+          ),
+        ),
+      ));
+
+      await tester.tap(find.text('切替シートを開く'));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+
+      // TikTok タブに切り替えてログインスロット @my_tiktok_main が見えることを確認
+      await tester.tap(find.text('TikTok'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('@my_tiktok_main'), findsOneWidget);
+
+      // 直接 @ユーザー名 ジャンプを試す
+      await tester.enterText(find.byType(TextField).first, 'harajuku_cafe');
+      await tester.tap(find.text('@ID開く'));
+      await tester.pumpAndSettle();
+      expect(browser.activePlatform, SnsPlatform.tiktok);
+      expect(browser.url, 'https://www.tiktok.com/@harajuku_cafe');
+      expect(tester.takeException(), isNull);
+    });
+  });
+}
+
+class _FakeBrowserCookieStore implements BrowserCookieStore {
+  final Map<SnsPlatform, List<SavedCookie>> jar = {
+    SnsPlatform.instagram: <SavedCookie>[],
+    SnsPlatform.tiktok: <SavedCookie>[],
+  };
+
+  @override
+  Future<List<SavedCookie>> getCookiesForPlatform(SnsPlatform platform) async =>
+      [...(jar[platform] ?? const <SavedCookie>[])];
+
+  @override
+  Future<void> clearCookiesForPlatform(SnsPlatform platform) async {
+    jar[platform] = <SavedCookie>[];
+  }
+
+  @override
+  Future<void> applyCookiesForPlatform(SnsPlatform platform, List<SavedCookie> cookies) async {
+    jar[platform] = [...cookies];
+  }
 }
 
 class _OfflineSpotDataService extends SpotDataService {

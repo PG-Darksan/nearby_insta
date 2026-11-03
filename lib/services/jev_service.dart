@@ -16,7 +16,7 @@ typedef PreparedAvatar = ({String base64, String format});
 /// アカウントのアイコン URL から画像を取得し、TypeSafe API の制限（280〜1568px, PNG/JPEG）に合わせて整形する関数。
 typedef AvatarPreparer = Future<PreparedAvatar?> Function(String url, http.Client client);
 
-/// Instagram のフォロー中・フォロワー一覧から抽出した 1 アカウント分の判定対象（アイコン画像＋名前）。
+/// Instagram・TikTok のフォロー中・フォロワー一覧から抽出した 1 アカウント分の判定対象（アイコン画像＋名前）。
 class InstagramAccountCandidate {
   const InstagramAccountCandidate({
     required this.username,
@@ -24,12 +24,16 @@ class InstagramAccountCandidate {
     this.avatarUrl = '',
     this.avatarBase64,
     this.avatarFormat,
+    this.platform = 'instagram',
   });
 
   final String username;
   final String displayName;
 
-  /// Instagram CDN のプロフィールアイコン URL（WebView 側で `<canvas>` 取得できなかった場合のフォールバック用）。
+  /// 抽出元 SNS（`'instagram'` または `'tiktok'`）。
+  final String platform;
+
+  /// SNS CDN のプロフィールアイコン URL（WebView 側で `<canvas>` 取得できなかった場合のフォールバック用）。
   final String avatarUrl;
 
   /// WebView 側で 320×320 に描画して取得済みの Base64 画像データ（`data:` プレフィックスなし）。
@@ -38,16 +42,26 @@ class InstagramAccountCandidate {
   /// [avatarBase64] の画像形式（`'jpg'` または `'png'`）。
   final String? avatarFormat;
 
+  bool get isTikTok => platform.trim().toLowerCase() == 'tiktok';
+
   bool get hasAvatarSource =>
       avatarUrl.trim().isNotEmpty || (avatarBase64 != null && avatarBase64!.trim().isNotEmpty);
 
-  /// Instagram CDN の署名クエリ（`?oh=...&oe=...`）を除いた安定したアイコン識別子。
+  /// Instagram / TikTok CDN の署名クエリ（`?oh=...&oe=...` / `?x-expires=...&x-signature=...`）を除いた安定したアイコン識別子。
   String get avatarId {
     final rawUrl = avatarUrl.trim();
     if (rawUrl.isNotEmpty) {
       final uri = Uri.tryParse(rawUrl);
-      final seg = uri?.pathSegments.isNotEmpty == true ? uri!.pathSegments.last : rawUrl;
-      if (seg.isNotEmpty) return seg.toLowerCase();
+      final nonEmpty = uri?.pathSegments.where((s) => s.isNotEmpty).toList() ?? const <String>[];
+      if (nonEmpty.isNotEmpty) {
+        final last = nonEmpty.last;
+        // TikTok CDN で末尾が "100x100.jpeg" 等の解像度名のみの場合は直前のハッシュも連結する
+        if (nonEmpty.length >= 2 && RegExp(r'^\d+x\d+\.[a-z0-9]+$', caseSensitive: false).hasMatch(last)) {
+          return '${nonEmpty[nonEmpty.length - 2]}_$last'.toLowerCase();
+        }
+        return last.toLowerCase();
+      }
+      return rawUrl.toLowerCase();
     }
     final b64 = avatarBase64?.trim() ?? '';
     if (b64.isNotEmpty) {
@@ -58,7 +72,11 @@ class InstagramAccountCandidate {
     return '';
   }
 
-  String get cacheKey => '${username.trim().toLowerCase()}|${displayName.trim().toLowerCase()}|$avatarId';
+  /// Instagram の既存キャッシュキーと完全互換を保ちつつ、TikTok は `tt:` プレフィックスで衝突を防ぐ。
+  String get cacheKey {
+    final base = '${username.trim().toLowerCase()}|${displayName.trim().toLowerCase()}|$avatarId';
+    return isTikTok ? 'tt:$base' : base;
+  }
 }
 
 /// TypeSafe AI の判断特化モデル「Jev」（System One API）を用いて、
@@ -569,9 +587,14 @@ class JevService extends ChangeNotifier {
     Map<int, PreparedAvatar> avatars = const {},
     String nonce = 'jev0',
   }) {
+    final hasTikTok = batch.any((c) => c.isTikTok);
+    final hasInstagram = batch.any((c) => !c.isTikTok);
+    final platformScope = (hasTikTok && hasInstagram)
+        ? 'SNS (Instagram / TikTok)'
+        : (hasTikTok ? 'TikTok' : 'Instagram');
     final state = StringBuffer()
       ..writeln(
-        'Task: Judge whether each numbered Instagram account is a FEMALE individual\'s personal account '
+        'Task: Judge whether each numbered $platformScope account is a FEMALE individual\'s personal account '
         'using BOTH its profile icon image (when provided in the question) and its @username + display_name.',
       )
       ..writeln(
@@ -599,11 +622,12 @@ class JevService extends ChangeNotifier {
 
     for (var i = 0; i < batch.length; i++) {
       final item = batch[i];
+      final snsLabel = item.isTikTok ? 'TikTok' : 'Instagram';
       final u = item.username.trim().replaceAll('"', '');
       var d = item.displayName.replaceAll(RegExp(r'\s+'), ' ').trim().replaceAll('"', "'");
       if (d.length > 80) d = d.substring(0, 80);
       final displayLabel = d.isEmpty ? '(none)' : d;
-      state.writeln('#$i: @username="$u" | display_name="$displayLabel"');
+      state.writeln('#$i: [$snsLabel] @username="$u" | display_name="$displayLabel"');
 
       final avatar = avatars[i];
       String iconClause;
@@ -622,10 +646,10 @@ class JevService extends ChangeNotifier {
       questions['q_$i'] = {
         'type': 'noul',
         'instructions':
-            'Account #$i (@$u, display_name: "$displayLabel"), $iconClause — '
-            'Is this a female person\'s personal Instagram account?',
+            'Account #$i ($snsLabel @$u, display_name: "$displayLabel"), $iconClause — '
+            'Is this a female person\'s personal $snsLabel account?',
         'criteria': {
-          'true': 'Personal Instagram account of a female individual (from profile icon and/or name)',
+          'true': 'Personal $snsLabel account of a female individual (from profile icon and/or name)',
           'false': 'Male person, shop/brand/organization/club/bot, or gender-unknown account',
         },
       };
@@ -666,9 +690,14 @@ class JevService extends ChangeNotifier {
   static Future<PreparedAvatar?> defaultPrepareAvatar(String url, http.Client client) async {
     final uri = Uri.tryParse(url.trim());
     if (uri == null || (uri.scheme != 'https' && uri.scheme != 'http')) return null;
-    final res = await client.get(uri, headers: const {
+    final hostLower = uri.host.toLowerCase();
+    final referer = (hostLower.contains('tiktok') || hostLower.contains('musical.ly') || hostLower.contains('byteimg'))
+        ? 'https://www.tiktok.com/'
+        : ((hostLower.contains('instagram') || hostLower.contains('fbcdn')) ? 'https://www.instagram.com/' : null);
+    final res = await client.get(uri, headers: {
       'Accept': 'image/jpeg,image/png,image/webp,image/*,*/*;q=0.8',
       'User-Agent': 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36',
+      'Referer': ?referer,
     }).timeout(const Duration(seconds: 6));
     if (res.statusCode != 200 || res.bodyBytes.isEmpty) return null;
 

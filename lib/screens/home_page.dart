@@ -14,7 +14,6 @@ import '../services/search_history.dart';
 import '../widgets/listing_dialog.dart';
 import '../widgets/place_widgets.dart';
 import '../widgets/search_filters.dart';
-import '../widgets/side_panel.dart';
 import 'sns_browser.dart';
 
 enum _MapAction { search, addListing }
@@ -27,25 +26,23 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  /// これより狭い画面（スマホ）では地図と一覧をタブで切り替える。
+  /// これより狭い画面（スマホ）では地図と SNS をタブで切り替える。
   static const _wideBreakpoint = 840.0;
 
-  /// 地図に描くマーカーの上限（多すぎると地図の操作が重くなる）。一覧には全件を表示する。
+  /// 地図に描くマーカーの上限（多すぎると地図の操作が重くなる）。
   static const _maxMarkers = 600;
 
   final _controller = NearbyController();
   final _browser = SnsBrowserController();
   final _map = MapController();
-  final _list = ScrollController();
   final _placeQuery = TextEditingController();
   Timer? _warmUpTimer;
   bool _mapReady = false;
   LatLng? _fittedCenter;
   int? _fittedRadius;
 
-  /// スマホ: 0 地図 / 1 一覧 / 2 SNS。PC の右側: 0 一覧 / 1 SNS。
+  /// スマホ: 0 地図 / 1 SNS。
   int _tab = 0;
-  int _sideTab = 0;
 
   /// SNS を広げて表示しているか（PC は地図を、スマホは下のタブを隠す）。
   bool _browserExpanded = false;
@@ -73,7 +70,6 @@ class _HomePageState extends State<HomePage> {
     _warmUpTimer?.cancel();
     _controller.dispose();
     _browser.dispose();
-    _list.dispose();
     _placeQuery.dispose();
     super.dispose();
   }
@@ -88,13 +84,13 @@ class _HomePageState extends State<HomePage> {
   }
 
   /// SNS のページをアプリ内ブラウザで開く（使えない端末では外部のブラウザで）。
-  void _openLink(String url) {
+  void _openLink(String url, {String? label}) {
     if (!SnsBrowserController.supported) {
       openExternal(url);
       return;
     }
-    _browser.open(url);
-    setState(() => _wide ? _sideTab = 1 : _tab = 2);
+    _browser.open(url, label: label);
+    if (!_wide) setState(() => _tab = 1);
   }
 
   /// Instagram で [query] のアカウントを検索する（アプリ内ブラウザが使えなければ Google で探す）。
@@ -104,7 +100,41 @@ class _HomePageState extends State<HomePage> {
       return;
     }
     _browser.searchInstagram(query);
-    setState(() => _wide ? _sideTab = 1 : _tab = 2);
+    if (!_wide) setState(() => _tab = 1);
+  }
+
+  /// TikTok で [query] のアカウントを検索する（アプリ内ブラウザが使えなければ外部ブラウザで開く）。
+  void _searchTikTok(String query) {
+    if (!SnsBrowserController.supported) {
+      openExternal('https://www.tiktok.com/search/user?q=${Uri.encodeQueryComponent(query)}');
+      return;
+    }
+    _browser.searchTikTok(query);
+    if (!_wide) setState(() => _tab = 1);
+  }
+
+  List<NearbySnsTarget> _collectNearbySnsTargets() {
+    final out = <NearbySnsTarget>[];
+    for (final p in _controller.visiblePlaces) {
+      for (final l in p.sortedLinks) {
+        if ((l.platform == SnsPlatform.instagram || l.platform == SnsPlatform.tiktok) && l.username != null) {
+          out.add((link: l, placeName: p.name));
+        }
+      }
+    }
+    return out;
+  }
+
+  void _stepSelectedPlace(int delta) {
+    final places = _controller.visiblePlaces;
+    if (places.length < 2) return;
+    final curIdx = places.indexWhere((p) => p.id == _controller.selectedId);
+    final nextIdx = curIdx < 0 ? 0 : (curIdx + delta) % places.length;
+    final chosen = places[nextIdx < 0 ? nextIdx + places.length : nextIdx];
+    _controller.select(chosen.id);
+    if (_mapReady) {
+      _map.move(chosen.position, math.max(_map.camera.zoom, 15));
+    }
   }
 
   void _toggleHidden(Place place, bool hidden) {
@@ -116,7 +146,7 @@ class _HomePageState extends State<HomePage> {
       messenger.showSnackBar(
         SnackBar(
           duration: const Duration(seconds: 3),
-          content: Text('「${place.name}」を地図と一覧から非表示にしました'),
+          content: Text('「${place.name}」を地図から非表示にしました'),
           action: SnackBarAction(
             label: '元に戻す',
             onPressed: () => _controller.setHidden(place, false),
@@ -158,24 +188,9 @@ class _HomePageState extends State<HomePage> {
     _fitToSearchArea();
   }
 
-  void _selectFromList(Place place) {
-    _controller.select(place.id);
-    if (!_wide) setState(() => _tab = 0);
-    _map.move(place.position, math.max(_map.camera.zoom, 16));
-  }
-
   void _selectFromMap(Place place) {
     setState(() => _pickedPoint = null);
     _controller.select(place.id);
-    final index = _controller.visiblePlaces.indexWhere((p) => p.id == place.id);
-    if (index >= 0 && _list.hasClients) {
-      final target = (index - 1) * PlaceTile.height;
-      _list.animateTo(
-        target.clamp(0, _list.position.maxScrollExtent),
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeOut,
-      );
-    }
   }
 
   void _onMapTap(TapPosition tap, LatLng point) {
@@ -338,46 +353,35 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     final wide = _wide;
-    final panel = ListenableBuilder(
+    final browser = ListenableBuilder(
       listenable: _controller,
-      builder: (context, _) => SidePanel(
-        controller: _controller,
-        scrollController: _list,
-        onSelect: _selectFromList,
-        onAddListing: () {
-          if (!wide) setState(() => _tab = 0);
-          _addListing(_mapReady ? _map.camera.center : (_controller.center ?? const LatLng(35.681, 139.767)));
-        },
-        onOpenLink: _openLink,
-        onSearchInstagram: _searchInstagram,
-        onToggleHidden: _toggleHidden,
+      builder: (context, _) => SnsBrowser(
+        controller: _browser,
+        expanded: _browserExpanded,
+        onToggleExpanded: () => setState(() => _browserExpanded = !_browserExpanded),
+        nearbyTargets: _collectNearbySnsTargets(),
       ),
     );
-    final browser = SnsBrowser(
-      controller: _browser,
-      expanded: _browserExpanded,
-      onToggleExpanded: () => setState(() => _browserExpanded = !_browserExpanded),
-    );
-    // スマホの戻るボタン: SNS ではページを戻り、それ以外のタブからは地図に戻る
+    // スマホの戻るボタン: SNS ではページを戻り、それ以外は地図に戻る
     return PopScope(
       canPop: wide || _tab == 0,
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) return;
-        if (_tab == 2 && _browser.canGoBack) {
+        if (_tab == 1 && _browser.canGoBack) {
           _browser.back();
-        } else if (_tab == 2 && _browserExpanded) {
+        } else if (_tab == 1 && _browserExpanded) {
           setState(() => _browserExpanded = false);
         } else {
           setState(() => _tab = 0);
         }
       },
-      child: _buildScaffold(context, wide, panel, browser),
+      child: _buildScaffold(context, wide, browser),
     );
   }
 
-  Widget _buildScaffold(BuildContext context, bool wide, Widget panel, Widget browser) {
+  Widget _buildScaffold(BuildContext context, bool wide, Widget browser) {
     // スマホの SNS タブでは上のバーを隠して、SNS のページを広く表示する（広げたときは下のタブも隠す）
-    final snsTab = !wide && _tab == 2;
+    final snsTab = !wide && _tab == 1;
     return Scaffold(
       appBar: snsTab
           ? null
@@ -432,11 +436,12 @@ class _HomePageState extends State<HomePage> {
                     icon: const Icon(Icons.history),
                   ),
                 ),
-                IconButton(
-                  tooltip: 'アプリ内で SNS を開く（Instagram にログインできます）',
-                  onPressed: () => _openLink(_browser.url ?? SnsBrowserController.homeUrl),
-                  icon: const FaIcon(FontAwesomeIcons.instagram, size: 20),
-                ),
+                if (!wide)
+                  IconButton(
+                    tooltip: 'アプリ内で SNS を開く（Instagram にログインできます）',
+                    onPressed: () => _openLink(_browser.url ?? SnsBrowserController.homeUrl),
+                    icon: const FaIcon(FontAwesomeIcons.instagram, size: 20),
+                  ),
                 ListenableBuilder(
                   listenable: _controller,
                   builder: (context, _) => IconButton(
@@ -449,110 +454,49 @@ class _HomePageState extends State<HomePage> {
               ],
             ),
       body: wide
-          ? _buildWideBody(context, panel, browser)
+          ? _buildWideBody(context, browser)
           : IndexedStack(
               index: _tab,
               sizing: StackFit.expand,
-              children: [_buildMap(context), panel, SafeArea(child: browser)],
+              children: [_buildMap(context), SafeArea(child: browser)],
             ),
       bottomNavigationBar: wide || (snsTab && _browserExpanded)
           ? null
-          : ListenableBuilder(
-              listenable: _controller,
-              builder: (context, _) => NavigationBar(
-                selectedIndex: _tab,
-                onDestinationSelected: (i) => setState(() => _tab = i),
-                destinations: [
-                  const NavigationDestination(icon: Icon(Icons.map_outlined), label: '地図'),
-                  NavigationDestination(
-                    icon: Badge(
-                      label: Text('${_controller.visiblePlaces.length}'),
-                      child: const Icon(Icons.list),
-                    ),
-                    label: '一覧',
-                  ),
-                  const NavigationDestination(icon: FaIcon(FontAwesomeIcons.instagram, size: 20), label: 'SNS'),
-                ],
-              ),
+          : NavigationBar(
+              selectedIndex: _tab,
+              onDestinationSelected: (i) => setState(() => _tab = i),
+              destinations: const [
+                NavigationDestination(icon: Icon(Icons.map_outlined), label: '地図'),
+                NavigationDestination(icon: FaIcon(FontAwesomeIcons.instagram, size: 20), label: 'SNS'),
+              ],
             ),
     );
   }
 
-  /// PC: 左に地図、右に一覧か SNS。SNS は画面の半分ほどの幅で表示し、広げると地図を隠して全体に表示する。
-  /// 一覧タブを表示している間も SNS 側の WebView を SNS 表示幅のまま保持し、タブ切り替え時のリサイズ遅延を防ぐ。
-  Widget _buildWideBody(BuildContext context, Widget panel, Widget browser) {
+  /// PC・横画面: 左に地図、右に SNS。SNS は画面の半分ほどの幅で表示し、広げると地図を隠して全体に表示する。
+  Widget _buildWideBody(BuildContext context, Widget browser) {
     return LayoutBuilder(builder: (context, box) {
       final total = box.maxWidth;
       final snsWidth = math.min(math.max(560.0, total * 0.5), total - 280);
-      final normal = _sideTab == 0 ? 400.0 : snsWidth;
-      final full = _sideTab == 1 && _browserExpanded;
+      final full = _browserExpanded;
       return Stack(
         children: [
           Positioned(
             left: 0,
             top: 0,
             bottom: 0,
-            width: total - normal - 1,
+            width: math.max(0, total - snsWidth - 1),
             child: Offstage(offstage: full, child: _buildMap(context)),
           ),
           Positioned(
             right: 0,
             top: 0,
             bottom: 0,
-            width: full ? total : normal + 1,
+            width: full ? total : snsWidth + 1,
             child: Row(
               children: [
-                const VerticalDivider(width: 1),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-                        child: ListenableBuilder(
-                          listenable: _controller,
-                          builder: (context, _) => SegmentedButton<int>(
-                            showSelectedIcon: false,
-                            segments: [
-                              ButtonSegment(
-                                value: 0,
-                                icon: const Icon(Icons.list, size: 18),
-                                label: Text('一覧 ${_controller.visiblePlaces.length}'),
-                              ),
-                              const ButtonSegment(
-                                value: 1,
-                                icon: FaIcon(FontAwesomeIcons.instagram, size: 16),
-                                label: Text('SNS'),
-                              ),
-                            ],
-                            selected: {_sideTab},
-                            onSelectionChanged: (v) => setState(() => _sideTab = v.first),
-                          ),
-                        ),
-                      ),
-                      Expanded(
-                        child: LayoutBuilder(
-                          builder: (context, inner) => IndexedStack(
-                            index: _sideTab,
-                            sizing: StackFit.expand,
-                            children: [
-                              panel,
-                              UnconstrainedBox(
-                                alignment: Alignment.topLeft,
-                                clipBehavior: Clip.hardEdge,
-                                child: SizedBox(
-                                  width: full ? math.max(0, total - 1) : snsWidth,
-                                  height: inner.maxHeight,
-                                  child: browser,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+                if (!full) const VerticalDivider(width: 1),
+                Expanded(child: browser),
               ],
             ),
           ),
@@ -571,9 +515,11 @@ class _HomePageState extends State<HomePage> {
         final selected = c.selected;
         final places = c.visiblePlaces;
         final selectedVisible = selected != null && places.any((p) => p.id == selected.id);
-        // 一覧は近い順なので、先頭から上限まで（遠い場所は一覧でのみ表示）
         final markers = places.length > _maxMarkers ? places.sublist(0, _maxMarkers) : places;
         final picked = _pickedPoint;
+        final loadingStatus = c.searching
+            ? (c.status ?? '検索中…')
+            : (c.eventStatus ?? c.snsStatus);
         return Stack(
           children: [
             FlutterMap(
@@ -653,46 +599,29 @@ class _HomePageState extends State<HomePage> {
                           icon: const Icon(Icons.travel_explore, size: 18),
                           label: const Text('地図の中心で検索'),
                         ),
-                        if (_wide) ...[
-                          ActionChip(
-                            avatar: Icon(Icons.radar, size: 16, color: scheme.primary),
-                            label: Text('範囲 ${radiusLabel(c.radius)}'),
-                            tooltip: '検索範囲の km を指定',
+                        if (loadingStatus != null)
+                          Chip(
+                            avatar: const SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                            label: Text(loadingStatus),
                             backgroundColor: scheme.surface.withValues(alpha: 0.92),
                             visualDensity: VisualDensity.compact,
-                            onPressed: () => showRadiusInputDialog(context, c),
                           ),
-                          FilledButton.tonalIcon(
-                            onPressed: () => showSearchFiltersSheet(context, c),
-                            icon: const Icon(Icons.checklist, size: 18),
-                            label: const Text('表示切替'),
-                          ),
-                          if (c.hiddenPlaces.isNotEmpty)
-                            ActionChip(
-                              avatar: Icon(Icons.visibility_off_outlined, size: 16, color: scheme.primary),
-                              label: Text('非表示 ${c.hiddenPlaces.length}件'),
-                              backgroundColor: scheme.surface.withValues(alpha: 0.92),
-                              visualDensity: VisualDensity.compact,
-                              onPressed: () => showHiddenPlacesSheet(context, c),
-                            ),
-                          Chip(
-                            avatar: const Icon(Icons.touch_app_outlined, size: 16),
-                            label: const Text('地図をタップして地点を指定'),
-                            backgroundColor: scheme.surface.withValues(alpha: 0.9),
-                            visualDensity: VisualDensity.compact,
-                          ),
-                        ],
                         if (places.length > _maxMarkers)
                           Chip(
                             avatar: const Icon(Icons.info_outline, size: 16),
-                            label: Text('地図には近い $_maxMarkers 件を表示（全 ${places.length} 件は一覧に）'),
+                            label: Text('近い $_maxMarkers / ${places.length} 件を表示中'),
                             backgroundColor: scheme.surface.withValues(alpha: 0.9),
                             visualDensity: VisualDensity.compact,
                           ),
                       ],
                     ),
                   ),
-                  if (!_wide) ...[const SizedBox(height: 8), MapFilterBar(controller: c)],
+                  const SizedBox(height: 8),
+                  MapFilterBar(controller: c),
                 ],
               ),
             ),
@@ -731,8 +660,11 @@ class _HomePageState extends State<HomePage> {
                         platforms: c.platforms,
                         isHidden: c.isHidden(selected.id),
                         onToggleHidden: (hidden) => _toggleHidden(selected, hidden),
-                        onOpenLink: _openLink,
+                        onOpenLink: (url) => _openLink(url, label: selected.name),
                         onSearchInstagram: _searchInstagram,
+                        onSearchTikTok: _searchTikTok,
+                        onPrevPlace: places.length >= 2 ? () => _stepSelectedPlace(-1) : null,
+                        onNextPlace: places.length >= 2 ? () => _stepSelectedPlace(1) : null,
                         onClose: () => c.select(null),
                         onEdit: selected.listing == null ? null : () => _editListing(selected.listing!),
                         onDelete: selected.listing == null ? null : () => _deleteListing(selected.listing!),

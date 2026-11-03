@@ -27,7 +27,7 @@ double? parseKmInput(String raw) {
   return value;
 }
 
-/// 検索範囲と、表示する種類・SNS・対象のチェック切り替え。一覧の上と、地図の「絞り込み／表示切替」画面で使う。
+/// 検索範囲と、表示する種類・SNS・対象のチェック切り替え。地図の「絞り込み」画面で使う。
 class SearchFilters extends StatelessWidget {
   const SearchFilters({super.key, required this.controller});
 
@@ -72,7 +72,7 @@ class SearchFilters extends StatelessWidget {
         const SizedBox(height: 8),
         Row(
           children: [
-            Text('地図・一覧に表示する種類', style: text.labelMedium),
+            Text('地図に表示する種類', style: text.labelMedium),
             const Spacer(),
             TextButton(
               style: TextButton.styleFrom(
@@ -414,7 +414,7 @@ Future<void> showHiddenPlacesSheet(BuildContext context, NearbyController contro
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text('チェックして非表示にした場所（${entries.length}件）', style: text.titleMedium),
-                            Text('チェックを外すと地図と一覧に再表示されます',
+                            Text('チェックを外すと地図に再表示されます',
                                 style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant)),
                           ],
                         ),

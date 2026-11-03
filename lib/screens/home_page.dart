@@ -654,6 +654,14 @@ class _HomePageState extends State<HomePage> {
                           label: const Text('地図の中心で検索'),
                         ),
                         if (_wide) ...[
+                          ActionChip(
+                            avatar: Icon(Icons.radar, size: 16, color: scheme.primary),
+                            label: Text('範囲 ${radiusLabel(c.radius)}'),
+                            tooltip: '検索範囲の km を指定',
+                            backgroundColor: scheme.surface.withValues(alpha: 0.92),
+                            visualDensity: VisualDensity.compact,
+                            onPressed: () => showRadiusInputDialog(context, c),
+                          ),
                           FilledButton.tonalIcon(
                             onPressed: () => showSearchFiltersSheet(context, c),
                             icon: const Icon(Icons.checklist, size: 18),

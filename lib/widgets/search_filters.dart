@@ -5,7 +5,27 @@ import '../controllers/nearby_controller.dart';
 import '../models/place.dart';
 import 'place_widgets.dart';
 
-String radiusLabel(int r) => r < 1000 ? '${r}m' : '${r ~/ 1000}km';
+/// メートル単位の半径を余分な末尾ゼロなしの km 数値文字列（例: 1000 -> "1", 1500 -> "1.5", 300 -> "0.3"）にする。
+String formatKmValue(int meters) {
+  if (meters % 1000 == 0) return '${meters ~/ 1000}';
+  return (meters / 1000).toStringAsFixed(2).replaceFirst(RegExp(r'\.?0+$'), '');
+}
+
+String radiusLabel(int r) => r < 1000 ? '${r}m' : '${formatKmValue(r)}km';
+
+/// ユーザーの入力文字列（全角数字・小数点・末尾の km を許容）を正の km 数値として解釈する。
+double? parseKmInput(String raw) {
+  final normalized = raw
+      .replaceAllMapped(RegExp(r'[０-９]'), (m) => String.fromCharCode(m[0]!.codeUnitAt(0) - 0xFEE0))
+      .replaceAll('．', '.')
+      .replaceAll('。', '.')
+      .replaceAll(RegExp(r'(?:km|ｋｍ|\s)+', caseSensitive: false), '')
+      .trim();
+  if (normalized.isEmpty) return null;
+  final value = double.tryParse(normalized);
+  if (value == null || !value.isFinite || value <= 0) return null;
+  return value;
+}
 
 /// 検索範囲と、表示する種類・SNS・対象のチェック切り替え。一覧の上と、地図の「絞り込み／表示切替」画面で使う。
 class SearchFilters extends StatelessWidget {
@@ -23,18 +43,30 @@ class SearchFilters extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text('検索範囲', style: text.labelMedium),
+        Row(
+          children: [
+            Text('検索範囲', style: text.labelMedium),
+            const Spacer(),
+            _RadiusKmField(
+              radius: c.radius,
+              onApplyKm: c.setRadiusKm,
+            ),
+          ],
+        ),
         const SizedBox(height: 6),
         SizedBox(
           width: double.infinity,
           child: SegmentedButton<int>(
+            emptySelectionAllowed: true,
             showSelectedIcon: false,
             style: const ButtonStyle(visualDensity: VisualDensity.compact),
             segments: [
               for (final r in NearbyController.radiusOptions) ButtonSegment(value: r, label: Text(radiusLabel(r))),
             ],
-            selected: {c.radius},
-            onSelectionChanged: (s) => c.setRadius(s.first),
+            selected: {if (NearbyController.radiusOptions.contains(c.radius)) c.radius},
+            onSelectionChanged: (s) {
+              if (s.isNotEmpty) c.setRadius(s.first);
+            },
           ),
         ),
         const SizedBox(height: 8),
@@ -157,6 +189,170 @@ class SearchFilters extends StatelessWidget {
             label: Text('チェックして非表示にした場所（${c.hiddenPlaces.length}件）'),
           ),
         ],
+      ],
+    );
+  }
+}
+
+class _RadiusKmField extends StatefulWidget {
+  const _RadiusKmField({required this.radius, required this.onApplyKm});
+
+  final int radius;
+  final ValueChanged<double> onApplyKm;
+
+  @override
+  State<_RadiusKmField> createState() => _RadiusKmFieldState();
+}
+
+class _RadiusKmFieldState extends State<_RadiusKmField> {
+  late final TextEditingController _text = TextEditingController(text: formatKmValue(widget.radius));
+
+  @override
+  void didUpdateWidget(covariant _RadiusKmField oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.radius != widget.radius) {
+      final formatted = formatKmValue(widget.radius);
+      if (_text.text != formatted) {
+        _text.value = TextEditingValue(
+          text: formatted,
+          selection: TextSelection.collapsed(offset: formatted.length),
+        );
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _text.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final km = parseKmInput(_text.text);
+    if (km == null) {
+      _text.text = formatKmValue(widget.radius);
+      return;
+    }
+    FocusScope.of(context).unfocus();
+    widget.onApplyKm(km);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        SizedBox(
+          width: 92,
+          child: TextField(
+            controller: _text,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            textInputAction: TextInputAction.done,
+            textAlign: TextAlign.right,
+            style: Theme.of(context).textTheme.bodySmall,
+            decoration: InputDecoration(
+              isDense: true,
+              contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              suffixText: ' km',
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+            onSubmitted: (_) => _submit(),
+          ),
+        ),
+        const SizedBox(width: 4),
+        TextButton(
+          style: TextButton.styleFrom(
+            visualDensity: VisualDensity.compact,
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            minimumSize: const Size(0, 30),
+          ),
+          onPressed: _submit,
+          child: const Text('指定'),
+        ),
+      ],
+    );
+  }
+}
+
+/// 検索範囲（km 数値）を直接入力するダイアログ。
+Future<void> showRadiusInputDialog(BuildContext context, NearbyController controller) async {
+  final result = await showDialog<double>(
+    context: context,
+    builder: (_) => _RadiusInputDialog(initialRadius: controller.radius),
+  );
+  if (result != null) {
+    await controller.setRadiusKm(result);
+  }
+}
+
+class _RadiusInputDialog extends StatefulWidget {
+  const _RadiusInputDialog({required this.initialRadius});
+
+  final int initialRadius;
+
+  @override
+  State<_RadiusInputDialog> createState() => _RadiusInputDialogState();
+}
+
+class _RadiusInputDialogState extends State<_RadiusInputDialog> {
+  late final TextEditingController _input = TextEditingController(text: formatKmValue(widget.initialRadius));
+  String? _errorText;
+
+  @override
+  void dispose() {
+    _input.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final km = parseKmInput(_input.text);
+    if (km == null) {
+      setState(() => _errorText = '0.1〜50 の数値を入力してください');
+      return;
+    }
+    Navigator.pop(context, km);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('検索範囲（km）を指定'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          TextField(
+            controller: _input,
+            autofocus: true,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            textInputAction: TextInputAction.done,
+            decoration: InputDecoration(
+              labelText: '半径（km）',
+              suffixText: 'km',
+              helperText: '0.1〜50 km の範囲で指定できます（例: 0.5, 2.5, 15）',
+              errorText: _errorText,
+              border: const OutlineInputBorder(),
+            ),
+            onSubmitted: (_) => _submit(),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              for (final r in NearbyController.radiusOptions)
+                ActionChip(
+                  label: Text(radiusLabel(r)),
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () => Navigator.pop(context, r / 1000),
+                ),
+            ],
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('キャンセル')),
+        FilledButton(onPressed: _submit, child: const Text('適用')),
       ],
     );
   }
@@ -294,11 +490,19 @@ class MapFilterBar extends StatelessWidget {
         children: [
           PopupMenuButton<int>(
             tooltip: '検索範囲',
-            initialValue: c.radius,
-            onSelected: c.setRadius,
+            initialValue: NearbyController.radiusOptions.contains(c.radius) ? c.radius : null,
+            onSelected: (v) {
+              if (v < 0) {
+                showRadiusInputDialog(context, c);
+              } else {
+                c.setRadius(v);
+              }
+            },
             itemBuilder: (context) => [
               for (final r in NearbyController.radiusOptions)
                 PopupMenuItem(value: r, child: Text('半径 ${radiusLabel(r)}')),
+              const PopupMenuDivider(),
+              const PopupMenuItem(value: -1, child: Text('数値を入力して指定 (km)…')),
             ],
             child: Chip(
               avatar: Icon(Icons.radar, size: 18, color: scheme.primary),

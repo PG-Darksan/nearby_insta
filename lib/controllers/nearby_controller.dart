@@ -45,6 +45,8 @@ class NearbyController extends ChangeNotifier {
   late final EventService _events;
 
   static const radiusOptions = [300, 1000, 3000, 5000, 10000, 20000];
+  static const minRadius = 100;
+  static const maxRadius = 50000;
   // 飲食店まで含めると数万件になるので、Vincenty より軽い Haversine で距離を求める
   static const _distance = Distance(calculator: Haversine());
   static const _maxHistory = 15;
@@ -167,7 +169,7 @@ class NearbyController extends ChangeNotifier {
     } catch (e) {
       debugPrint('保存データの読み込みに失敗: $e');
     }
-    await _finder.warmUp();
+    await Future.wait([_finder.warmUp(), _repository.warmUp()]);
     _recompute();
     await locate();
   }
@@ -192,8 +194,10 @@ class NearbyController extends ChangeNotifier {
   /// 地図や地名検索・履歴で選んだ地点を検索する。[name] が分かっていれば町名の代わりに表示する。
   Future<void> setCenter(LatLng position, {String? name, int? radius}) {
     _setCenter(position, LocationSource.manual, name != null ? '指定した地点' : '地図で指定した地点', name: name);
-    if (radius != null) this.radius = radius;
+    if (radius != null) this.radius = radius.clamp(minRadius, maxRadius);
     locationNote = null;
+    final bundled = _repository.cachedBundledAround(position, this.radius);
+    if (bundled.isNotEmpty) _osmPlaces = placesFromOsm(bundled);
     _eventPlaces = _events.cachedAround(position, this.radius);
     _recompute();
     return search();
@@ -219,15 +223,18 @@ class NearbyController extends ChangeNotifier {
   }
 
   Future<void> setRadius(int value) {
-    radius = value;
+    radius = value.clamp(minRadius, maxRadius);
     if (center case final at?) {
-      final cachedEvents = _events.cachedAround(at, value);
+      final cachedEvents = _events.cachedAround(at, radius);
       if (cachedEvents.isNotEmpty) _eventPlaces = cachedEvents;
     }
     _recompute();
     notifyListeners(); // 現在地を取得中で検索しないときも、選んだ範囲を表示する
     return search();
   }
+
+  /// ユーザーが指定した km 単位の数値（例: 0.5, 2.5, 15）で検索範囲を変更する。
+  Future<void> setRadiusKm(double km) => setRadius((km * 1000).round());
 
   /// 保存済みの範囲はすぐに表示し、足りない範囲だけを取得する。[refresh] なら全て取り直す。
   Future<void> search({bool refresh = false}) async {

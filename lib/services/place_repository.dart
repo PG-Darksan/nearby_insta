@@ -6,19 +6,26 @@ import 'package:latlong2/latlong.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../models/place.dart';
+import 'bundled_instagram_service.dart';
 import 'overpass_service.dart';
 import 'spot_data_service.dart';
 
 /// 場所のデータを集める。日本国内は配信データ（[SpotDataService]）をタイル単位で読むのですぐに表示できる。
+/// 東京・神奈川エリアはアプリ内に埋め込んだ Instagram アカウントデータ（[BundledInstagramService]）を通信前に即時表示する。
 /// 配信データの範囲外や配信サーバーに繋がらないときは Overpass API から取得し、
 /// 約 2km 四方のタイルに分けて端末に保存して次回以降は通信せずに再利用する。
 class PlaceRepository {
-  PlaceRepository({OverpassService? overpass, SpotDataService? spots})
-      : _overpass = overpass ?? OverpassService(),
-        _spots = spots ?? SpotDataService();
+  PlaceRepository({
+    OverpassService? overpass,
+    SpotDataService? spots,
+    BundledInstagramService? bundled,
+  })  : _overpass = overpass ?? OverpassService(),
+        _spots = spots ?? SpotDataService(),
+        _bundled = bundled ?? BundledInstagramService();
 
   final OverpassService _overpass;
   final SpotDataService _spots;
+  final BundledInstagramService _bundled;
 
   static const tileDeg = 0.02;
 
@@ -29,8 +36,15 @@ class PlaceRepository {
   final _memory = <String, _Tile>{};
   Directory? _dir;
 
+  /// 起動時に埋め込みデータを裏で展開しておく。
+  Future<void> warmUp() => _bundled.warmUp();
+
+  /// [center] から [radiusMeters] の範囲に埋め込み済みのスポットがあれば同期的に返す。
+  List<Map<String, dynamic>> cachedBundledAround(LatLng center, int radiusMeters) =>
+      _bundled.cachedElementsAround(center, radiusMeters);
+
   /// [center] から [radiusMeters] の範囲の要素を集める。
-  /// 保存済みのタイルを先に、取得したタイルを区画ごとに [onElements] へ（それまでの全件で）渡す。
+  /// 保存済みのタイル・埋め込みデータを先に、取得したタイルを区画ごとに [onElements] へ（それまでの全件で）渡す。
   /// [refresh] が true なら保存済みのタイルも取り直す。
   Future<void> load(
     LatLng center,
@@ -39,10 +53,15 @@ class PlaceRepository {
     required void Function(List<Map<String, dynamic>> elements, {required bool complete}) onElements,
     void Function(String)? onStatus,
   }) async {
+    final bundled = await _bundled.elementsAround(center, radiusMeters);
+    if (bundled.isNotEmpty) {
+      onElements(bundled, complete: false);
+    }
+
     final meta = await _spots.meta(refresh: refresh);
     if (meta != null && meta.covers(center)) {
       final loaded = <String, List<Map<String, dynamic>>>{};
-      List<Map<String, dynamic>> all() => [for (final e in loaded.values) ...e];
+      List<Map<String, dynamic>> all() => _mergeElements([for (final e in loaded.values) ...e], bundled);
       final keys = meta.tilesAround(center, radiusMeters);
       try {
         await _spots.tiles(
@@ -52,7 +71,7 @@ class PlaceRepository {
           onCached: (tiles) {
             loaded.addAll(tiles);
             final complete = tiles.length == keys.length;
-            if (tiles.isNotEmpty || complete) onElements(all(), complete: complete);
+            if (tiles.isNotEmpty || bundled.isNotEmpty || complete) onElements(all(), complete: complete);
             if (!complete) onStatus?.call('スポットデータを取得中…');
           },
           onFetched: (key, elements) {
@@ -62,17 +81,56 @@ class PlaceRepository {
         );
         return;
       } catch (e) {
-        // 1 枚も読めなければ Overpass API から取得する
-        if (loaded.isNotEmpty) rethrow;
+        // 1 枚でも配信タイルが読めていればそれを活かす。1 枚も読めなければ Overpass へフォールバックする
+        if (loaded.isNotEmpty) {
+          if (bundled.isNotEmpty) {
+            onElements(all(), complete: true);
+            return;
+          }
+          rethrow;
+        }
         onStatus?.call('配信データに繋がらないため、OpenStreetMap から直接取得します…');
       }
     }
-    await _loadFromOverpass(center, radiusMeters, refresh: refresh, onElements: onElements, onStatus: onStatus);
+    try {
+      await _loadFromOverpass(
+        center,
+        radiusMeters,
+        bundled: bundled,
+        refresh: refresh,
+        onElements: onElements,
+        onStatus: onStatus,
+      );
+    } catch (_) {
+      if (bundled.isNotEmpty) {
+        onElements(bundled, complete: true);
+        return;
+      }
+      rethrow;
+    }
+  }
+
+  /// 取得済みの要素 [primary] を優先しつつ、まだ含まれていない埋め込み要素 [bundled] を補完する。
+  static List<Map<String, dynamic>> _mergeElements(
+    List<Map<String, dynamic>> primary,
+    List<Map<String, dynamic>> bundled,
+  ) {
+    if (bundled.isEmpty) return primary;
+    if (primary.isEmpty) return bundled;
+    final seen = <String>{
+      for (final el in primary) '${el['type']}/${el['id']}',
+    };
+    return [
+      ...primary,
+      for (final el in bundled)
+        if (!seen.contains('${el['type']}/${el['id']}')) el,
+    ];
   }
 
   Future<void> _loadFromOverpass(
     LatLng center,
     int radiusMeters, {
+    required List<Map<String, dynamic>> bundled,
     required bool refresh,
     required void Function(List<Map<String, dynamic>> elements, {required bool complete}) onElements,
     void Function(String)? onStatus,
@@ -88,13 +146,13 @@ class PlaceRepository {
         missing.add(key);
       }
     }
-    List<Map<String, dynamic>> all() => [for (final e in found.values) ...e];
+    List<Map<String, dynamic>> all() => _mergeElements([for (final e in found.values) ...e], bundled);
 
     if (missing.isEmpty) {
       onElements(all(), complete: true);
       return;
     }
-    if (found.isNotEmpty) onElements(all(), complete: false);
+    if (found.isNotEmpty || bundled.isNotEmpty) onElements(all(), complete: false);
 
     final chunks = _chunks(missing, center);
     var done = 0;

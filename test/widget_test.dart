@@ -1,13 +1,20 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:nearby_insta/controllers/nearby_controller.dart';
 import 'package:nearby_insta/models/listing.dart';
 import 'package:nearby_insta/models/place.dart';
 import 'package:nearby_insta/screens/sns_browser.dart';
+import 'package:nearby_insta/services/bundled_instagram_service.dart';
 import 'package:nearby_insta/services/event_service.dart';
 import 'package:nearby_insta/services/geocoding_service.dart';
 import 'package:nearby_insta/services/hidden_places_store.dart';
+import 'package:nearby_insta/services/jev_service.dart';
 import 'package:nearby_insta/services/listing_store.dart';
 import 'package:nearby_insta/services/overpass_service.dart';
 import 'package:nearby_insta/services/place_repository.dart';
@@ -858,4 +865,285 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('カフェ六浦'), findsOneWidget);
   });
+
+  group('検索範囲の km 数値指定', () {
+    test('parseKmInput / formatKmValue / radiusLabel / setRadiusKm', () async {
+      expect(parseKmInput('2.5'), 2.5);
+      expect(parseKmInput(' 3.25 km '), 3.25);
+      expect(parseKmInput('３．５ｋｍ'), 3.5);
+      expect(parseKmInput('0'), isNull);
+      expect(parseKmInput('-2'), isNull);
+      expect(parseKmInput('abc'), isNull);
+
+      expect(formatKmValue(1000), '1');
+      expect(formatKmValue(1500), '1.5');
+      expect(formatKmValue(300), '0.3');
+      expect(radiusLabel(300), '300m');
+      expect(radiusLabel(2500), '2.5km');
+
+      final c = NearbyController(
+        repository: _FakePlaceRepository(const []),
+        events: _FakeEventService(const []),
+        hiddenStore: _FakeHiddenStore(),
+        listingStore: _FakeListingStore(),
+        historyStore: _FakeHistoryStore(),
+        geocoding: _NoopGeocoding(),
+        finder: _NoopSnsFinder(),
+      );
+      await c.setCenter(const LatLng(35.659, 139.700), name: '渋谷', radius: 1000);
+      await c.setRadiusKm(2.5);
+      expect(c.radius, 2500);
+      await c.setRadiusKm(0.02);
+      expect(c.radius, NearbyController.minRadius);
+      await c.setRadiusKm(120);
+      expect(c.radius, NearbyController.maxRadius);
+    });
+
+    testWidgets('SearchFilters の km 入力欄と MapFilterBar の数値指定ダイアログから変更できる', (tester) async {
+      final c = NearbyController(
+        repository: _FakePlaceRepository(const []),
+        events: _FakeEventService(const []),
+        hiddenStore: _FakeHiddenStore(),
+        listingStore: _FakeListingStore(),
+        historyStore: _FakeHistoryStore(),
+        geocoding: _NoopGeocoding(),
+        finder: _NoopSnsFinder(),
+      );
+      await c.setCenter(const LatLng(35.659, 139.700), name: '渋谷', radius: 1000);
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: ListenableBuilder(
+            listenable: c,
+            builder: (context, _) => SingleChildScrollView(
+              child: Column(
+                children: [
+                  MapFilterBar(controller: c),
+                  SearchFilters(controller: c),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ));
+
+      // SearchFilters のインライン km 入力欄に 2.5 を入れて「指定」を押す
+      await tester.enterText(find.byType(TextField).first, '2.5');
+      await tester.tap(find.text('指定'));
+      await tester.pumpAndSettle();
+      expect(c.radius, 2500);
+      expect(find.text('範囲 2.5km'), findsOneWidget);
+
+      // MapFilterBar の検索範囲メニューから数値指定ダイアログを開いて 4.2km に変更する
+      await tester.tap(find.text('範囲 2.5km'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('数値を入力して指定 (km)…'));
+      await tester.pumpAndSettle();
+      expect(find.text('検索範囲（km）を指定'), findsOneWidget);
+
+      await tester.enterText(find.byType(TextField).last, '4.2');
+      await tester.tap(find.text('適用'));
+      await tester.pumpAndSettle();
+      expect(c.radius, 4200);
+      expect(find.text('範囲 4.2km'), findsOneWidget);
+    });
+  });
+
+  group('Jev を用いた Instagram 男性アカウント非表示', () {
+    test('System One リクエスト構築・男性判定・キャッシュ再利用・しきい値変更', () async {
+      final tempDir = await Directory.systemTemp.createTemp('nearby_insta_jev_test_');
+      addTearDown(() async {
+        if (await tempDir.exists()) await tempDir.delete(recursive: true);
+      });
+
+      var httpCalls = 0;
+      Map<String, dynamic>? capturedRequest;
+      String? capturedAuth;
+
+      final mockClient = MockClient((request) async {
+        httpCalls++;
+        capturedAuth = request.headers['Authorization'];
+        capturedRequest = jsonDecode(request.body) as Map<String, dynamic>;
+        return http.Response(
+          jsonEncode({
+            'model': 'jev-20260401',
+            'answers': {
+              'q_0': {'type': 'noul', 'noul': 0.94},
+              'q_1': {'type': 'noul', 'noul': 0.04},
+              'q_2': {'type': 'noul', 'noul': 0.02},
+            },
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+
+      final jev = JevService(
+        client: mockClient,
+        settingsFile: File('${tempDir.path}/jev_settings.json'),
+        cacheFile: File('${tempDir.path}/jev_account_cache.json'),
+      );
+      await jev.updateSettings(apiKey: 'ts_test_key_123', hideMaleAccounts: true, threshold: 0.65);
+      expect(jev.isActive, isTrue);
+
+      const candidates = [
+        InstagramAccountCandidate(username: 'taro_yamada_98', displayName: '山田 太郎'),
+        InstagramAccountCandidate(username: 'hanako_sato_02', displayName: '佐藤 花子'),
+        InstagramAccountCandidate(username: 'shibuya_cafe_tokyo', displayName: 'SHIBUYA CAFE'),
+      ];
+
+      final first = await jev.judgeMaleAccounts(candidates);
+      expect(httpCalls, 1);
+      expect(capturedAuth, 'Bearer ts_test_key_123');
+      expect(capturedRequest?['model'], 'jev-latest');
+      expect((capturedRequest?['questions'] as Map)['q_0']['type'], 'noul');
+      expect(first, {
+        'taro_yamada_98': true,
+        'hanako_sato_02': false,
+        'shibuya_cafe_tokyo': false,
+      });
+
+      // 2 回目はキャッシュから即座に返り、API 通信が発生しない
+      final second = await jev.judgeMaleAccounts(candidates);
+      expect(httpCalls, 1);
+      expect(second['taro_yamada_98'], isTrue);
+
+      // しきい値を引き上げた場合も、保存済みの noul 確率から通信なしで再判定される
+      await jev.updateSettings(threshold: 0.90);
+      final strict = await jev.judgeMaleAccounts(candidates);
+      expect(httpCalls, 1);
+      expect(strict['taro_yamada_98'], isTrue);
+
+      // 注入スクリプトにフォロー中・フォロワー検出と CSS 非表示ルールが含まれる
+      expect(SnsBrowserController.followerFilterScript, contains('nearbyCheckAccounts'));
+      expect(SnsBrowserController.followerFilterScript, contains('nearbyFollowListState'));
+      expect(SnsBrowserController.followerFilterScript, contains('nearby-jev-hide-male'));
+    });
+
+    testWidgets('Jev 設定ダイアログで接続テストと API キー保存ができる', (tester) async {
+      final mockClient = MockClient((request) async {
+        return http.Response(
+          jsonEncode({
+            'model': 'jev-20260401',
+            'answers': {
+              'q_0': {'type': 'noul', 'noul': 0.96},
+              'q_1': {'type': 'noul', 'noul': 0.03},
+            },
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+
+      final jev = JevService(client: mockClient, inMemoryOnly: true);
+      final browser = SnsBrowserController(jev: jev);
+      addTearDown(browser.dispose);
+
+      await tester.pumpWidget(MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: FilledButton(
+              onPressed: () => showJevSettingsDialog(context, browser),
+              child: const Text('Jev設定を開く'),
+            ),
+          ),
+        ),
+      ));
+
+      await tester.tap(find.text('Jev設定を開く'));
+      await tester.pumpAndSettle();
+      expect(find.text('Jev 男性アカウント非表示'), findsOneWidget);
+
+      await tester.enterText(find.byType(TextField), 'ts_live_secret_token');
+      await tester.tap(find.text('接続テスト'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Jev に接続できました'), findsOneWidget);
+
+      await tester.tap(find.text('保存'));
+      await tester.pumpAndSettle();
+      expect(jev.apiKey, 'ts_live_secret_token');
+      expect(jev.isActive, isTrue);
+    });
+  });
+
+  group('東京・神奈川の埋め込み Instagram アカウントデータ', () {
+    test('アプリ内蔵アセットから東京・神奈川の両エリアの Instagram スポットを展開できる', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      final bundled = BundledInstagramService();
+      await bundled.warmUp();
+      expect(bundled.totalSpots, greaterThan(5000));
+
+      const shibuyaCenter = LatLng(35.6595, 139.7005);
+      final shibuyaElements = await bundled.elementsAround(shibuyaCenter, 1500);
+      final shibuyaPlaces = placesFromOsm(shibuyaElements);
+      expect(shibuyaPlaces, isNotEmpty);
+      expect(
+        shibuyaPlaces.every((p) => p.links.any((l) => l.platform == SnsPlatform.instagram)),
+        isTrue,
+      );
+
+      const yokohamaCenter = LatLng(35.4658, 139.6223);
+      final yokohamaElements = await bundled.elementsAround(yokohamaCenter, 2000);
+      final yokohamaPlaces = placesFromOsm(yokohamaElements);
+      expect(yokohamaPlaces, isNotEmpty);
+      expect(
+        yokohamaPlaces.every((p) => p.links.any((l) => l.platform == SnsPlatform.instagram)),
+        isTrue,
+      );
+    });
+
+    test('オフライン時でも PlaceRepository が埋め込み Instagram データを即時返して完了する', () async {
+      const center = LatLng(35.6595, 139.7005);
+      final bundled = BundledInstagramService.fromTiles({
+        '356_1397': [
+          {
+            'type': 'node',
+            'id': 9001,
+            'lat': 35.6596,
+            'lon': 139.7006,
+            'tags': {
+              'name': '渋谷埋め込みカフェ',
+              'amenity': 'cafe',
+              'contact:instagram': 'shibuya_bundled_cafe',
+            },
+          },
+        ],
+      });
+      final repo = PlaceRepository(
+        bundled: bundled,
+        spots: _OfflineSpotDataService(),
+        overpass: _OfflineOverpassService(),
+      );
+
+      final callbacks = <(int count, bool complete)>[];
+      List<Map<String, dynamic>> lastElements = const [];
+      await repo.load(
+        center,
+        1000,
+        refresh: true,
+        onElements: (elements, {required bool complete}) {
+          lastElements = elements;
+          callbacks.add((elements.length, complete));
+        },
+      );
+
+      expect(callbacks.first, (1, false));
+      expect(callbacks.last, (1, true));
+      final places = placesFromOsm(lastElements);
+      expect(places.single.name, '渋谷埋め込みカフェ');
+      expect(_ids(places.single.links), ['instagram:shibuya_bundled_cafe']);
+    });
+  });
+}
+
+class _OfflineSpotDataService extends SpotDataService {
+  @override
+  Future<SpotMeta?> meta({bool refresh = false}) async => null;
+}
+
+class _OfflineOverpassService extends OverpassService {
+  @override
+  Future<List<Map<String, dynamic>>> fetch(Bounds bounds, {void Function(String)? onStatus}) async {
+    throw const SocketException('offline');
+  }
 }

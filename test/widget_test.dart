@@ -949,8 +949,8 @@ void main() {
     });
   });
 
-  group('Jev を用いた Instagram 男性アカウント非表示', () {
-    test('System One リクエスト構築・男性判定・キャッシュ再利用・しきい値変更', () async {
+  group('Jev を用いた Instagram 女性アカウント抽出・アイコン送信・費用表示', () {
+    test('アイコン画像(assets)＋名前のリクエスト構築・女性判定・費用集計・キャッシュ再利用', () async {
       final tempDir = await Directory.systemTemp.createTemp('nearby_insta_jev_test_');
       addTearDown(() async {
         if (await tempDir.exists()) await tempDir.delete(recursive: true);
@@ -958,19 +958,23 @@ void main() {
 
       var httpCalls = 0;
       Map<String, dynamic>? capturedRequest;
-      String? capturedAuth;
+      Map<String, String>? capturedHeaders;
 
       final mockClient = MockClient((request) async {
         httpCalls++;
-        capturedAuth = request.headers['Authorization'];
+        capturedHeaders = request.headers;
         capturedRequest = jsonDecode(request.body) as Map<String, dynamic>;
         return http.Response(
           jsonEncode({
-            'model': 'jev-20260401',
+            'model': 'jev-1.14.0',
             'answers': {
-              'q_0': {'type': 'noul', 'noul': 0.94},
-              'q_1': {'type': 'noul', 'noul': 0.04},
-              'q_2': {'type': 'noul', 'noul': 0.02},
+              'q_0': {'type': 'noul', 'noul': 0.95},
+              'q_1': {'type': 'noul', 'noul': 0.03},
+              'q_2': {'type': 'noul', 'noul': 0.05},
+            },
+            'usage': {
+              'input_tokens': 10000,
+              'output_tokens': 0,
             },
           }),
           200,
@@ -978,56 +982,112 @@ void main() {
         );
       });
 
+      final samplePngB64 = base64Encode(JevService.makeSolidPng(width: 320, height: 320));
+      var preparedUrlCalls = 0;
+
       final jev = JevService(
         client: mockClient,
         settingsFile: File('${tempDir.path}/jev_settings.json'),
-        cacheFile: File('${tempDir.path}/jev_account_cache.json'),
+        cacheFile: File('${tempDir.path}/jev_female_cache_v2.json'),
+        avatarPreparer: (url, _) async {
+          preparedUrlCalls++;
+          return (base64: samplePngB64, format: 'png');
+        },
       );
-      await jev.updateSettings(apiKey: 'ts_test_key_123', hideMaleAccounts: true, threshold: 0.65);
+      await jev.updateSettings(apiKey: 'ts_test_key_123', onlyFemaleAccounts: true, threshold: 0.55);
       expect(jev.isActive, isTrue);
 
-      const candidates = [
-        InstagramAccountCandidate(username: 'taro_yamada_98', displayName: '山田 太郎'),
-        InstagramAccountCandidate(username: 'hanako_sato_02', displayName: '佐藤 花子'),
-        InstagramAccountCandidate(username: 'shibuya_cafe_tokyo', displayName: 'SHIBUYA CAFE'),
+      final candidates = [
+        InstagramAccountCandidate(
+          username: 'hanako_sato_02',
+          displayName: '佐藤 花子',
+          avatarBase64: 'data:image/jpeg;base64,$samplePngB64',
+          avatarFormat: 'jpg',
+        ),
+        const InstagramAccountCandidate(
+          username: 'taro_yamada_98',
+          displayName: '山田 太郎',
+          avatarUrl: 'https://scontent.cdninstagram.com/v/t51.2885-19/4490001_n.jpg?oh=abc&oe=123',
+        ),
+        const InstagramAccountCandidate(
+          username: 'shibuya_cafe_tokyo',
+          displayName: 'SHIBUYA CAFE',
+        ),
       ];
 
-      final first = await jev.judgeMaleAccounts(candidates);
+      final first = await jev.judgeFemaleAccounts(candidates);
       expect(httpCalls, 1);
-      expect(capturedAuth, 'Bearer ts_test_key_123');
+      expect(preparedUrlCalls, 1);
+      expect(capturedHeaders?['Authorization'], 'Bearer ts_test_key_123');
+      expect(capturedHeaders?['TypeSafe-Danger-Zone-Images'], 'true');
       expect(capturedRequest?['model'], 'jev-latest');
-      expect((capturedRequest?['questions'] as Map)['q_0']['type'], 'noul');
+
+      final assets = capturedRequest?['assets'] as Map<String, dynamic>?;
+      expect(assets, isNotNull);
+      expect(assets!.length, 2); // Base64 渡し 1 件 + URL 取得渡し 1 件
+      final questions = capturedRequest?['questions'] as Map<String, dynamic>;
+      // 各アセット参照キーが対応する質問 instructions に 1 回ずつ含まれること
+      for (final assetRef in assets.keys) {
+        final matchingQ = questions.values.where(
+          (q) => ((q as Map)['instructions'] as String).contains(assetRef),
+        );
+        expect(matchingQ.length, 1);
+      }
+
+      // 女性個人アカウントのみ true、男性・店舗は false
       expect(first, {
-        'taro_yamada_98': true,
-        'hanako_sato_02': false,
+        'hanako_sato_02': true,
+        'taro_yamada_98': false,
         'shibuya_cafe_tokyo': false,
       });
 
-      // 2 回目はキャッシュから即座に返り、API 通信が発生しない
-      final second = await jev.judgeMaleAccounts(candidates);
-      expect(httpCalls, 1);
-      expect(second['taro_yamada_98'], isTrue);
+      // 費用集計: 10,000 input tokens * ($0.042 / 1,000,000) = $0.00042
+      expect(jev.totalApiCalls, 1);
+      expect(jev.totalInputTokens, 10000);
+      expect(jev.totalJudgedAccounts, 3);
+      expect(jev.totalCostUsd, closeTo(0.00042, 1e-8));
+      expect(JevService.formatUsd(jev.totalCostUsd), r'$0.00042');
+      expect(JevService.formatCostCompact(jev.totalCostUsd), contains('約¥'));
 
-      // しきい値を引き上げた場合も、保存済みの noul 確率から通信なしで再判定される
-      await jev.updateSettings(threshold: 0.90);
-      final strict = await jev.judgeMaleAccounts(candidates);
+      // 2 回目は CDN 署名クエリ (?oh=...) が変わってもキャッシュヒットし、追加課金なし
+      final second = await jev.judgeFemaleAccounts([
+        candidates[0],
+        const InstagramAccountCandidate(
+          username: 'taro_yamada_98',
+          displayName: '山田 太郎',
+          avatarUrl: 'https://scontent.cdninstagram.com/v/t51.2885-19/4490001_n.jpg?oh=NEW_TOKEN&oe=999',
+        ),
+        candidates[2],
+      ]);
       expect(httpCalls, 1);
-      expect(strict['taro_yamada_98'], isTrue);
+      expect(second['hanako_sato_02'], isTrue);
+      expect(second['taro_yamada_98'], isFalse);
 
-      // 注入スクリプトにフォロー中・フォロワー検出と CSS 非表示ルールが含まれる
+      // 費用リセット
+      await jev.resetUsageStats();
+      expect(jev.totalCostUsd, 0.0);
+      expect(jev.totalInputTokens, 0);
+
+      // 注入スクリプトにアイコン抽出・女性専用表示ルールが含まれる
+      expect(SnsBrowserController.followerFilterScript, contains('extractAvatar'));
       expect(SnsBrowserController.followerFilterScript, contains('nearbyCheckAccounts'));
       expect(SnsBrowserController.followerFilterScript, contains('nearbyFollowListState'));
-      expect(SnsBrowserController.followerFilterScript, contains('nearby-jev-hide-male'));
+      expect(SnsBrowserController.followerFilterScript, contains('nearby-jev-female-only'));
     });
 
-    testWidgets('Jev 設定ダイアログで接続テストと API キー保存ができる', (tester) async {
+    testWidgets('Jev 設定ダイアログでアイコン付き接続テスト・費用表示・API キー保存ができる', (tester) async {
       final mockClient = MockClient((request) async {
+        expect(request.headers['TypeSafe-Danger-Zone-Images'], 'true');
         return http.Response(
           jsonEncode({
-            'model': 'jev-20260401',
+            'model': 'jev-1.14.0',
             'answers': {
               'q_0': {'type': 'noul', 'noul': 0.96},
               'q_1': {'type': 'noul', 'noul': 0.03},
+            },
+            'usage': {
+              'input_tokens': 5000,
+              'output_tokens': 0,
             },
           }),
           200,
@@ -1052,17 +1112,22 @@ void main() {
 
       await tester.tap(find.text('Jev設定を開く'));
       await tester.pumpAndSettle();
-      expect(find.text('Jev 男性アカウント非表示'), findsOneWidget);
+      expect(find.text('Jev 女性アカウントのみ表示'), findsOneWidget);
+      expect(find.text('Jev に掛かった費用'), findsOneWidget);
 
       await tester.enterText(find.byType(TextField), 'ts_live_secret_token');
+      await tester.ensureVisible(find.text('接続テスト'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('接続テスト'));
       await tester.pumpAndSettle();
       expect(find.textContaining('Jev に接続できました'), findsOneWidget);
+      expect(find.textContaining(r'$0.00021'), findsWidgets);
 
       await tester.tap(find.text('保存'));
       await tester.pumpAndSettle();
       expect(jev.apiKey, 'ts_live_secret_token');
       expect(jev.isActive, isTrue);
+      expect(jev.totalInputTokens, 5000);
     });
   });
 

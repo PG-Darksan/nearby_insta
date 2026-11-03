@@ -71,13 +71,14 @@ class SnsBrowserController extends ChangeNotifier {
   String? searchQuery;
   InstagramSearchStatus searchStatus = InstagramSearchStatus.none;
 
-  /// Instagram のフォロー中・フォロワー一覧を開いているかと、非表示にした男性アカウント件数。
+  /// Instagram のフォロー中・フォロワー一覧を開いているかと、表示中の女性アカウント数・非表示にした他アカウント数。
   bool inFollowList = false;
-  int hiddenMaleCount = 0;
+  int visibleFemaleCount = 0;
+  int hiddenAccountCount = 0;
   int _activeJevRequests = 0;
   double _lastAppliedThreshold = JevService.defaultThreshold;
 
-  bool get checkingMaleAccounts => _activeJevRequests > 0;
+  bool get checkingAccounts => _activeJevRequests > 0;
 
   String? url;
   String? title;
@@ -98,15 +99,15 @@ class SnsBrowserController extends ChangeNotifier {
   void _onJevChanged() {
     final thresholdChanged = (_lastAppliedThreshold - jev.threshold).abs() > 0.0001;
     _lastAppliedThreshold = jev.threshold;
-    unawaited(_syncMaleFilterToWebView(resetJudged: thresholdChanged));
+    unawaited(_syncFemaleFilterToWebView(resetJudged: thresholdChanged));
     notifyListeners();
   }
 
-  Future<void> setHideMaleAccounts(bool enabled) async {
-    await jev.updateSettings(hideMaleAccounts: enabled);
+  Future<void> setOnlyFemaleAccounts(bool enabled) async {
+    await jev.updateSettings(onlyFemaleAccounts: enabled);
   }
 
-  Future<void> _syncMaleFilterToWebView({bool resetJudged = false}) async {
+  Future<void> _syncFemaleFilterToWebView({bool resetJudged = false}) async {
     final web = _web;
     if (web == null) return;
     final current = Uri.tryParse(url ?? '');
@@ -115,8 +116,8 @@ class SnsBrowserController extends ChangeNotifier {
       await web.evaluateJavascript(
         source: '''
         $followerFilterScript
-        if (window.__nearbySetMaleFilter) {
-          window.__nearbySetMaleFilter(${jev.isActive}, $resetJudged);
+        if (window.__nearbySetFemaleFilter) {
+          window.__nearbySetFemaleFilter(${jev.isActive}, $resetJudged);
         }
         ''',
       );
@@ -321,8 +322,8 @@ for (let i = 0; i < 160; i++) {
 return 'failed';
 ''';
 
-  /// Instagram で「フォロー中」「フォロワー」を開いたときにアカウント行を検出し、
-  /// Jev で男性名と判定されたアカウントを非表示にするスクリプト。
+  /// Instagram で「フォロー中」「フォロワー」を開いたときにアカウント行（アイコン画像＋名前）を検出し、
+  /// Jev で女性個人のアカウントと判定されたものだけを表示するスクリプト。
   static const followerFilterScript = r'''
 (function() {
   if (!location.hostname || !location.hostname.endsWith('instagram.com')) return;
@@ -337,9 +338,13 @@ return 'failed';
   const IGNORE_TEXT = /^(フォロー|フォロー中|フォローバック|フォローする|削除|メッセージ|リクエスト済み|ブロック|制限する|親しい友達|共通|認証済み|新しいフォロワー|すべて見る|おすすめ|Follow|Following|Follow Back|Remove|Message|Requested|Verified|New|See All|Suggested|•|・|\s*)$/i;
   const IGNORE_SUB = /(がフォロー中|Followed by|フォロワー\s*[\d,.万kKmM]+|フォロー中\s*[\d,.万kKmM]+|件の投稿)/i;
   const FOLLOW_HEADER = /^(フォロワー|フォロー中|共通のフォロワー|Followers|Following|Mutual)(\s*[\d,.万kKmM人]+)?$/i;
+  const AVATAR_SIZE = 320;
 
   const judged = new Map();
   const inflight = new Set();
+  const hookedImages = new WeakSet();
+  let avatarCanvas = null;
+  let avatarCtx = null;
   let enabled = false;
   let timer = null;
   let lastReportedKey = '';
@@ -348,14 +353,16 @@ return 'failed';
     if (document.getElementById('nearby-jev-style')) return;
     const style = document.createElement('style');
     style.id = 'nearby-jev-style';
-    style.textContent = 'html.nearby-jev-hide-male [data-nearby-jev-male="1"] { display: none !important; }';
+    style.textContent =
+      'html.nearby-jev-female-only [data-nearby-jev-nonfemale="1"] { display: none !important; }\n' +
+      'html.nearby-jev-female-only [data-nearby-jev-pending="1"] { opacity: 0.45; transition: opacity 0.12s ease; }';
     (document.head || document.documentElement).appendChild(style);
   }
 
   function applyRootClass() {
     ensureStyle();
     if (document.documentElement) {
-      document.documentElement.classList.toggle('nearby-jev-hide-male', !!enabled);
+      document.documentElement.classList.toggle('nearby-jev-female-only', !!enabled);
     }
   }
 
@@ -461,12 +468,97 @@ return 'failed';
     return '';
   }
 
-  function reportState(active, hidden) {
-    const key = active + ':' + hidden;
+  function findAvatarImg(row, uLower) {
+    const imgs = row.querySelectorAll('img');
+    let fallback = null;
+    for (const img of imgs) {
+      const src = img.currentSrc || img.getAttribute('src') || '';
+      if (!src || src.startsWith('data:image/svg')) continue;
+      const w = img.naturalWidth || img.width || img.clientWidth || 0;
+      const h = img.naturalHeight || img.height || img.clientHeight || 0;
+      if (w > 0 && w < 24 && h > 0 && h < 24) continue;
+      const alt = (img.getAttribute('alt') || '').toLowerCase();
+      if (alt.includes('プロフィール') || alt.includes('profile') || alt.includes(uLower)) {
+        return img;
+      }
+      if (!fallback) fallback = img;
+    }
+    return fallback;
+  }
+
+  function extractAvatar(row, uLower) {
+    const img = findAvatarImg(row, uLower);
+    if (!img) return { url: '', b64: '', fmt: '' };
+    const url = img.currentSrc || img.getAttribute('src') || '';
+    if (!img.complete && !hookedImages.has(img)) {
+      hookedImages.add(img);
+      img.addEventListener('load', () => scheduleScan(120), { once: true });
+    }
+    if (img.complete && img.naturalWidth >= 24 && img.naturalHeight >= 24) {
+      try {
+        if (!avatarCanvas) {
+          avatarCanvas = document.createElement('canvas');
+          avatarCanvas.width = AVATAR_SIZE;
+          avatarCanvas.height = AVATAR_SIZE;
+          avatarCtx = avatarCanvas.getContext('2d', { willReadFrequently: false });
+        }
+        if (avatarCtx) {
+          avatarCtx.fillStyle = '#ffffff';
+          avatarCtx.fillRect(0, 0, AVATAR_SIZE, AVATAR_SIZE);
+          const sw = img.naturalWidth;
+          const sh = img.naturalHeight;
+          const scale = Math.max(AVATAR_SIZE / sw, AVATAR_SIZE / sh);
+          const dw = sw * scale;
+          const dh = sh * scale;
+          const dx = (AVATAR_SIZE - dw) / 2;
+          const dy = (AVATAR_SIZE - dh) / 2;
+          avatarCtx.drawImage(img, dx, dy, dw, dh);
+          const dataUrl = avatarCanvas.toDataURL('image/jpeg', 0.82);
+          const comma = dataUrl.indexOf(',');
+          if (comma > 0) {
+            return { url: url, b64: dataUrl.slice(comma + 1), fmt: 'jpg' };
+          }
+        }
+      } catch (_) {
+        // CORS 制約時は url を Flutter 側へ渡して直接取得・320x320 化する
+      }
+    }
+    return { url: url, b64: '', fmt: '' };
+  }
+
+  function applyRowJudgment(row, isFemale) {
+    row.removeAttribute('data-nearby-jev-pending');
+    if (isFemale) {
+      row.setAttribute('data-nearby-jev-female', '1');
+      row.removeAttribute('data-nearby-jev-nonfemale');
+    } else {
+      row.setAttribute('data-nearby-jev-nonfemale', '1');
+      row.removeAttribute('data-nearby-jev-female');
+    }
+  }
+
+  function nudgeInfiniteScroll(root) {
+    try {
+      const candidates = [root, ...root.querySelectorAll('div')];
+      for (const el of candidates) {
+        if (el.scrollHeight > el.clientHeight + 20) {
+          el.dispatchEvent(new Event('scroll', { bubbles: true }));
+        }
+      }
+      window.dispatchEvent(new Event('scroll'));
+    } catch (_) {}
+  }
+
+  function reportState(active, female, hidden) {
+    const key = active + ':' + female + ':' + hidden;
     if (key === lastReportedKey) return;
     lastReportedKey = key;
     if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
-      window.flutter_inappwebview.callHandler('nearbyFollowListState', { active: active, hidden: hidden }).catch(() => {});
+      window.flutter_inappwebview.callHandler('nearbyFollowListState', {
+        active: active,
+        female: female,
+        hidden: hidden
+      }).catch(() => {});
     }
   }
 
@@ -474,7 +566,7 @@ return 'failed';
     applyRootClass();
     const ctx = findFollowListContext();
     if (!ctx || !ctx.root) {
-      reportState(false, 0);
+      reportState(false, 0, 0);
       return;
     }
 
@@ -500,50 +592,56 @@ return 'failed';
       const row = findRowElement(entry.links, uLower, ctx);
       if (!row) continue;
       rowsByUser.set(uLower, row);
-      if (judged.has(uLower)) {
-        if (judged.get(uLower)) {
-          row.setAttribute('data-nearby-jev-male', '1');
-        } else {
-          row.removeAttribute('data-nearby-jev-male');
-        }
+      const cached = judged.get(uLower);
+      if (cached !== undefined) {
+        applyRowJudgment(row, cached);
       } else if (enabled && !inflight.has(uLower)) {
+        row.setAttribute('data-nearby-jev-pending', '1');
         const displayName = extractDisplayName(row, uLower);
-        toCheck.push({ u: entry.username, key: uLower, n: displayName });
+        const av = extractAvatar(row, uLower);
+        toCheck.push({ u: entry.username, key: uLower, n: displayName, img: av.url, b64: av.b64, fmt: av.fmt });
       }
     }
 
-    const countHidden = () => enabled ? ctx.root.querySelectorAll('[data-nearby-jev-male="1"]').length : 0;
-    reportState(true, countHidden());
+    const countFemale = () => enabled ? ctx.root.querySelectorAll('[data-nearby-jev-female="1"]').length : 0;
+    const countHidden = () => enabled ? ctx.root.querySelectorAll('[data-nearby-jev-nonfemale="1"]').length : 0;
+    reportState(true, countFemale(), countHidden());
 
     if (!enabled || toCheck.length === 0) return;
     if (!window.flutter_inappwebview || !window.flutter_inappwebview.callHandler) return;
 
-    const batch = toCheck.slice(0, 30);
+    const batch = toCheck.slice(0, 16);
     for (const item of batch) inflight.add(item.key);
+    let newlyHidden = 0;
     try {
       const res = await window.flutter_inappwebview.callHandler(
         'nearbyCheckAccounts',
-        batch.map((x) => ({ u: x.u, n: x.n }))
+        batch.map((x) => ({ u: x.u, n: x.n, img: x.img, b64: x.b64, fmt: x.fmt }))
       );
       if (res && typeof res === 'object') {
         for (const item of batch) {
           if (Object.prototype.hasOwnProperty.call(res, item.u)) {
-            const isMale = !!res[item.u];
-            judged.set(item.key, isMale);
+            const isFemale = !!res[item.u];
+            judged.set(item.key, isFemale);
+            if (!isFemale) newlyHidden++;
             const row = rowsByUser.get(item.key) || ctx.root.querySelector('[data-nearby-jev-row="' + item.key + '"]');
-            if (row) {
-              if (isMale) row.setAttribute('data-nearby-jev-male', '1');
-              else row.removeAttribute('data-nearby-jev-male');
-            }
+            if (row) applyRowJudgment(row, isFemale);
           }
         }
       }
     } catch (_) {
     } finally {
-      for (const item of batch) inflight.delete(item.key);
+      for (const item of batch) {
+        inflight.delete(item.key);
+        if (!judged.has(item.key)) {
+          const row = rowsByUser.get(item.key);
+          if (row) row.removeAttribute('data-nearby-jev-pending');
+        }
+      }
     }
-    reportState(true, countHidden());
-    if (toCheck.length > batch.length) scheduleScan(80);
+    reportState(true, countFemale(), countHidden());
+    if (newlyHidden > 0) nudgeInfiniteScroll(ctx.root);
+    if (toCheck.length > batch.length) scheduleScan(60);
   }
 
   function scheduleScan(delay) {
@@ -554,17 +652,25 @@ return 'failed';
     }, delay);
   }
 
-  window.__nearbySetMaleFilter = function(nextEnabled, resetJudged) {
+  window.__nearbySetFemaleFilter = function(nextEnabled, resetJudged) {
     enabled = !!nextEnabled;
     if (resetJudged) {
       judged.clear();
-      document.querySelectorAll('[data-nearby-jev-male]').forEach((el) => el.removeAttribute('data-nearby-jev-male'));
+      document.querySelectorAll('[data-nearby-jev-female],[data-nearby-jev-nonfemale],[data-nearby-jev-pending]')
+        .forEach((el) => {
+          el.removeAttribute('data-nearby-jev-female');
+          el.removeAttribute('data-nearby-jev-nonfemale');
+          el.removeAttribute('data-nearby-jev-pending');
+        });
+    } else if (!enabled) {
+      document.querySelectorAll('[data-nearby-jev-pending]')
+        .forEach((el) => el.removeAttribute('data-nearby-jev-pending'));
     }
     applyRootClass();
     scheduleScan(20);
   };
 
-  const obs = new MutationObserver(() => scheduleScan(160));
+  const obs = new MutationObserver(() => scheduleScan(150));
   obs.observe(document.documentElement, { childList: true, subtree: true });
   window.addEventListener('popstate', () => scheduleScan(100));
   scheduleScan(100);
@@ -597,13 +703,16 @@ return 'failed';
               InstagramAccountCandidate(
                 username: item['u'] as String,
                 displayName: (item['n'] as String?) ?? '',
+                avatarUrl: (item['img'] as String?) ?? '',
+                avatarBase64: item['b64'] as String?,
+                avatarFormat: item['fmt'] as String?,
               ),
         ];
         if (candidates.isEmpty) return const <String, bool>{};
         _activeJevRequests++;
         notifyListeners();
         try {
-          return await jev.judgeMaleAccounts(candidates);
+          return await jev.judgeFemaleAccounts(candidates);
         } finally {
           _activeJevRequests--;
           notifyListeners();
@@ -616,10 +725,14 @@ return 'failed';
         if (args.isEmpty || args.first is! Map) return null;
         final map = args.first as Map;
         final nextActive = map['active'] == true;
+        final nextFemale = (map['female'] as num?)?.toInt() ?? 0;
         final nextHidden = (map['hidden'] as num?)?.toInt() ?? 0;
-        if (inFollowList != nextActive || hiddenMaleCount != nextHidden) {
+        if (inFollowList != nextActive ||
+            visibleFemaleCount != nextFemale ||
+            hiddenAccountCount != nextHidden) {
           inFollowList = nextActive;
-          hiddenMaleCount = nextHidden;
+          visibleFemaleCount = nextFemale;
+          hiddenAccountCount = nextHidden;
           notifyListeners();
         }
         return null;
@@ -723,7 +836,7 @@ class SnsBrowser extends StatelessWidget {
                       ),
                     ),
                     if (onInstagram)
-                      _MaleFilterToggleButton(
+                      _FemaleFilterToggleButton(
                         controller: c,
                         onOpenSettings: () => showJevSettingsDialog(context, c),
                       ),
@@ -784,11 +897,15 @@ class SnsBrowser extends StatelessWidget {
                           value: 'jev',
                           child: ListTile(
                             leading: Icon(
-                              Icons.person_off_outlined,
+                              Icons.female,
                               color: c.jev.isActive ? scheme.primary : null,
                             ),
-                            title: const Text('Jev 男性アカウント非表示の設定'),
-                            subtitle: Text(c.jev.hasApiKey ? (c.jev.hideMaleAccounts ? 'ON' : 'OFF') : 'API キー未設定'),
+                            title: const Text('Jev 女性アカウント表示・費用の確認'),
+                            subtitle: Text(
+                              c.jev.hasApiKey
+                                  ? '${c.jev.onlyFemaleAccounts ? 'ON' : 'OFF'} · 累計 ${JevService.formatCostCompact(c.jev.totalCostUsd)}'
+                                  : 'API キー未設定',
+                            ),
                           ),
                         ),
                         const PopupMenuItem(
@@ -805,13 +922,18 @@ class SnsBrowser extends StatelessWidget {
                 ),
               ),
             ),
-            if (c.jev.hideMaleAccounts && c.jev.lastError != null)
+            if (onInstagram && (c.jev.isActive || c.jev.totalApiCalls > 0))
+              _JevUsageBar(
+                controller: c,
+                onOpenSettings: () => showJevSettingsDialog(context, c),
+              ),
+            if (c.jev.onlyFemaleAccounts && c.jev.lastError != null)
               _JevErrorBanner(
                 error: c.jev.lastError!,
                 onOpenSettings: () => showJevSettingsDialog(context, c),
                 onDismiss: () {
                   c.jev.lastError = null;
-                  c.setHideMaleAccounts(false);
+                  c.setOnlyFemaleAccounts(false);
                 },
               ),
             if (c.searchQuery case final query? when c.searchStatus != InstagramSearchStatus.none)
@@ -827,9 +949,9 @@ class SnsBrowser extends StatelessWidget {
   }
 }
 
-/// ツールバーの「男性非表示」ワンタップ切り替えボタン（長押しで Jev 設定を開く）。
-class _MaleFilterToggleButton extends StatelessWidget {
-  const _MaleFilterToggleButton({required this.controller, required this.onOpenSettings});
+/// ツールバーの「女性のみ」ワンタップ切り替えボタン（長押しで Jev 設定・費用を開く）。
+class _FemaleFilterToggleButton extends StatelessWidget {
+  const _FemaleFilterToggleButton({required this.controller, required this.onOpenSettings});
 
   final SnsBrowserController controller;
   final VoidCallback onOpenSettings;
@@ -839,15 +961,14 @@ class _MaleFilterToggleButton extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final c = controller;
     final active = c.jev.isActive;
-    final label = switch ((active, c.inFollowList, c.hiddenMaleCount)) {
-      (true, true, final n) when n > 0 => '男性 -$n',
-      (true, _, _) => '男性非表示',
-      _ => '男性非表示',
+    final label = switch ((active, c.inFollowList, c.visibleFemaleCount)) {
+      (true, true, final f) => '女性 $f件',
+      _ => '女性のみ',
     };
     return Tooltip(
       message: c.jev.hasApiKey
-          ? 'フォロー中・フォロワーの男性アカウント非表示（タップで切替 / 長押しで設定）'
-          : 'Jev API キーを設定して男性アカウントを非表示にする',
+          ? 'フォロー中・フォロワーで女性アカウントのみ表示（タップで切替 / 長押しで設定・費用確認）'
+          : 'Jev API キーを設定して女性アカウントのみ表示する',
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 2),
         child: InkWell(
@@ -856,7 +977,7 @@ class _MaleFilterToggleButton extends StatelessWidget {
             if (!c.jev.hasApiKey) {
               onOpenSettings();
             } else {
-              c.setHideMaleAccounts(!c.jev.hideMaleAccounts);
+              c.setOnlyFemaleAccounts(!c.jev.onlyFemaleAccounts);
             }
           },
           onLongPress: onOpenSettings,
@@ -870,7 +991,7 @@ class _MaleFilterToggleButton extends StatelessWidget {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                if (c.checkingMaleAccounts)
+                if (c.checkingAccounts)
                   SizedBox(
                     width: 13,
                     height: 13,
@@ -878,11 +999,11 @@ class _MaleFilterToggleButton extends StatelessWidget {
                   )
                 else
                   Icon(
-                    active ? Icons.person_off : Icons.person_off_outlined,
-                    size: 15,
+                    Icons.female,
+                    size: 16,
                     color: active ? scheme.onPrimaryContainer : scheme.onSurfaceVariant,
                   ),
-                const SizedBox(width: 4),
+                const SizedBox(width: 3),
                 Text(
                   label,
                   style: Theme.of(context).textTheme.labelSmall?.copyWith(
@@ -892,6 +1013,56 @@ class _MaleFilterToggleButton extends StatelessWidget {
                 ),
               ],
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// ブラウザ上部に常時表示する Jev の稼働状況・掛かった費用バー。
+class _JevUsageBar extends StatelessWidget {
+  const _JevUsageBar({required this.controller, required this.onOpenSettings});
+
+  final SnsBrowserController controller;
+  final VoidCallback onOpenSettings;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final c = controller;
+    final jev = c.jev;
+    final costLabel = JevService.formatCostCompact(jev.totalCostUsd);
+    final statusText = c.inFollowList && jev.isActive
+        ? '女性表示 ${c.visibleFemaleCount}件 / 非表示 ${c.hiddenAccountCount}件 · Jev費用 $costLabel'
+        : 'Jev ${jev.isActive ? '女性のみ表示ON（アイコン＋名前判定）' : 'OFF'} · 費用 $costLabel';
+    return Material(
+      color: scheme.surfaceContainerLow,
+      child: InkWell(
+        onTap: onOpenSettings,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+          child: Row(
+            children: [
+              Icon(Icons.payments_outlined, size: 14, color: scheme.primary),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  statusText,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant),
+                ),
+              ),
+              const SizedBox(width: 4),
+              Text(
+                '設定',
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: scheme.primary,
+                      fontWeight: FontWeight.w600,
+                    ),
+              ),
+            ],
           ),
         ),
       ),
@@ -938,7 +1109,7 @@ class _JevErrorBanner extends StatelessWidget {
   }
 }
 
-/// Jev（TypeSafe AI System One）の API キーと男性アカウント非表示の設定ダイアログ。
+/// Jev（TypeSafe AI System One）の女性アカウントのみ表示設定と掛かった費用の確認ダイアログ。
 Future<void> showJevSettingsDialog(BuildContext context, SnsBrowserController controller) async {
   await controller.jev.ensureLoaded();
   if (!context.mounted) return;
@@ -959,7 +1130,8 @@ class _JevSettingsDialog extends StatefulWidget {
 
 class _JevSettingsDialogState extends State<_JevSettingsDialog> {
   late final TextEditingController _keyInput = TextEditingController(text: widget.controller.jev.apiKey);
-  late bool _hideEnabled = widget.controller.jev.hasApiKey ? widget.controller.jev.hideMaleAccounts : true;
+  late bool _femaleOnlyEnabled =
+      widget.controller.jev.hasApiKey ? widget.controller.jev.onlyFemaleAccounts : true;
   late double _threshold = widget.controller.jev.threshold;
   bool _obscure = true;
   bool _testing = false;
@@ -975,131 +1147,188 @@ class _JevSettingsDialogState extends State<_JevSettingsDialog> {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final jev = widget.controller.jev;
-    return AlertDialog(
-      title: const Text('Jev 男性アカウント非表示'),
-      content: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 440),
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Instagram で「フォロー中」「フォロワー」を開いたとき、Jev（TypeSafe AI System One）で'
-                'アカウント名・表示名が男性と判定された個人アカウントを自動で非表示にします。',
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-              const SizedBox(height: 12),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('男性アカウントを非表示にする'),
-                value: _hideEnabled,
-                onChanged: (v) => setState(() => _hideEnabled = v),
-              ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: _keyInput,
-                obscureText: _obscure,
-                autocorrect: false,
-                enableSuggestions: false,
-                decoration: InputDecoration(
-                  labelText: 'TypeSafe API キー',
-                  hintText: 'Bearer トークンを入力',
-                  helperText: 'この端末内にのみ保存され、外部や GitHub には送信・公開されません',
-                  helperMaxLines: 2,
-                  border: const OutlineInputBorder(),
-                  suffixIcon: IconButton(
-                    tooltip: _obscure ? '表示' : '隠す',
-                    icon: Icon(_obscure ? Icons.visibility_outlined : Icons.visibility_off_outlined),
-                    onPressed: () => setState(() => _obscure = !_obscure),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  Text('判定のしきい値: ${(_threshold * 100).round()}%',
-                      style: Theme.of(context).textTheme.labelMedium),
-                  const Spacer(),
-                  Text(
-                    _threshold <= 0.58 ? '広めに非表示' : (_threshold >= 0.74 ? '確実なもののみ' : '標準'),
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
-                  ),
-                ],
-              ),
-              Slider(
-                value: _threshold.clamp(0.50, 0.85),
-                min: 0.50,
-                max: 0.85,
-                divisions: 7,
-                label: '${(_threshold * 100).round()}%',
-                onChanged: (v) => setState(() => _threshold = v),
-              ),
-              Row(
-                children: [
-                  OutlinedButton.icon(
-                    onPressed: _testing
-                        ? null
-                        : () async {
-                            setState(() {
-                              _testing = true;
-                              _testResult = null;
-                            });
-                            final res = await jev.testConnection(_keyInput.text);
-                            if (mounted) {
-                              setState(() {
-                                _testing = false;
-                                _testResult = res;
-                              });
-                            }
-                          },
-                    icon: _testing
-                        ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
-                        : const Icon(Icons.check_circle_outline, size: 18),
-                    label: const Text('接続テスト'),
-                  ),
-                  const SizedBox(width: 8),
-                  TextButton(
-                    onPressed: () async {
-                      await jev.clearCache();
-                      if (context.mounted) {
-                        ScaffoldMessenger.of(context)
-                            .showSnackBar(const SnackBar(content: Text('判定キャッシュを消去しました')));
-                      }
-                    },
-                    child: const Text('判定履歴を消去'),
-                  ),
-                ],
-              ),
-              if (_testResult case final r?) ...[
-                const SizedBox(height: 8),
+    return ListenableBuilder(
+      listenable: jev,
+      builder: (context, _) => AlertDialog(
+        title: const Text('Jev 女性アカウントのみ表示'),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 460),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
                 Text(
-                  r.message,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: r.ok ? scheme.primary : scheme.error,
-                        fontWeight: FontWeight.w600,
-                      ),
+                  'Instagram で「フォロー中」「フォロワー」を開いたとき、アカウントのアイコン画像と'
+                  'アカウント名・表示名を Jev（TypeSafe AI System One）に渡して判定し、'
+                  '女性個人のアカウントのみを表示します（男性・店舗・企業・性別不明アカウントを非表示）。',
+                  style: Theme.of(context).textTheme.bodySmall,
                 ),
+                const SizedBox(height: 12),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: scheme.surfaceContainerHighest.withValues(alpha: 0.6),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: scheme.outlineVariant),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(Icons.payments_outlined, size: 16, color: scheme.primary),
+                          const SizedBox(width: 6),
+                          Text('Jev に掛かった費用', style: Theme.of(context).textTheme.labelLarge),
+                          const Spacer(),
+                          if (jev.totalApiCalls > 0)
+                            TextButton(
+                              style: TextButton.styleFrom(
+                                visualDensity: VisualDensity.compact,
+                                padding: const EdgeInsets.symmetric(horizontal: 8),
+                                minimumSize: const Size(0, 26),
+                              ),
+                              onPressed: () async {
+                                await jev.resetUsageStats();
+                              },
+                              child: const Text('費用をリセット'),
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '累計: ${JevService.formatCostCompact(jev.totalCostUsd)}',
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+                      ),
+                      Text(
+                        '今回の起動中: ${JevService.formatCostCompact(jev.sessionCostUsd)}',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        '通信 ${jev.totalApiCalls}回 · 判定 ${jev.totalJudgedAccounts}件 · '
+                        '入力 ${jev.totalInputTokens} tok（単価 \$0.042 / 100万tok・出力無料・判定済みキャッシュは \$0）',
+                        style: Theme.of(context).textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 8),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('女性アカウントのみを表示する'),
+                  subtitle: const Text('アイコン画像＋アカウント名から女性個人アカウントを抽出'),
+                  value: _femaleOnlyEnabled,
+                  onChanged: (v) => setState(() => _femaleOnlyEnabled = v),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _keyInput,
+                  obscureText: _obscure,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  decoration: InputDecoration(
+                    labelText: 'TypeSafe API キー',
+                    hintText: 'Bearer トークンを入力',
+                    helperText: 'この端末内にのみ保存され、外部や GitHub には送信・公開されません',
+                    helperMaxLines: 2,
+                    border: const OutlineInputBorder(),
+                    suffixIcon: IconButton(
+                      tooltip: _obscure ? '表示' : '隠す',
+                      icon: Icon(_obscure ? Icons.visibility_outlined : Icons.visibility_off_outlined),
+                      onPressed: () => setState(() => _obscure = !_obscure),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Text('女性判定のしきい値: ${(_threshold * 100).round()}%',
+                        style: Theme.of(context).textTheme.labelMedium),
+                    const Spacer(),
+                    Text(
+                      _threshold <= 0.48 ? '広めに表示' : (_threshold >= 0.70 ? '確実な女性のみ' : '標準'),
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+                    ),
+                  ],
+                ),
+                Slider(
+                  value: _threshold.clamp(0.40, 0.85),
+                  min: 0.40,
+                  max: 0.85,
+                  divisions: 9,
+                  label: '${(_threshold * 100).round()}%',
+                  onChanged: (v) => setState(() => _threshold = v),
+                ),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 4,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    OutlinedButton.icon(
+                      onPressed: _testing
+                          ? null
+                          : () async {
+                              setState(() {
+                                _testing = true;
+                                _testResult = null;
+                              });
+                              final res = await jev.testConnection(_keyInput.text);
+                              if (mounted) {
+                                setState(() {
+                                  _testing = false;
+                                  _testResult = res;
+                                });
+                              }
+                            },
+                      icon: _testing
+                          ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                          : const Icon(Icons.check_circle_outline, size: 18),
+                      label: const Text('接続テスト'),
+                    ),
+                    TextButton(
+                      onPressed: () async {
+                        await jev.clearCache();
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context)
+                              .showSnackBar(const SnackBar(content: Text('判定キャッシュを消去しました')));
+                        }
+                      },
+                      child: const Text('判定履歴を消去'),
+                    ),
+                  ],
+                ),
+                if (_testResult case final r?) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    r.message,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: r.ok ? scheme.primary : scheme.error,
+                          fontWeight: FontWeight.w600,
+                        ),
+                  ),
+                ],
               ],
-            ],
+            ),
           ),
         ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('キャンセル')),
+          FilledButton(
+            onPressed: () async {
+              final trimmed = _keyInput.text.trim();
+              await jev.updateSettings(
+                apiKey: trimmed,
+                onlyFemaleAccounts: _femaleOnlyEnabled && trimmed.isNotEmpty,
+                threshold: _threshold,
+              );
+              if (context.mounted) Navigator.pop(context);
+            },
+            child: const Text('保存'),
+          ),
+        ],
       ),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(context), child: const Text('キャンセル')),
-        FilledButton(
-          onPressed: () async {
-            final trimmed = _keyInput.text.trim();
-            await jev.updateSettings(
-              apiKey: trimmed,
-              hideMaleAccounts: _hideEnabled && trimmed.isNotEmpty,
-              threshold: _threshold,
-            );
-            if (context.mounted) Navigator.pop(context);
-          },
-          child: const Text('保存'),
-        ),
-      ],
     );
   }
 }
@@ -1152,15 +1381,15 @@ class _WebView extends StatelessWidget {
       onUpdateVisitedHistory: (web, url, isReload) {
         c.url = url?.toString();
         c._updateHistory();
-        // Instagram はログイン後にページを読み込み直さずに移ることがあるので、URL が変わったときにも検索・非表示判定を同期する
+        // Instagram はログイン後にページを読み込み直さずに移ることがあるので、URL が変わったときにも検索・女性判定を同期する
         c._runPendingSearch();
-        c._syncMaleFilterToWebView();
+        c._syncFemaleFilterToWebView();
       },
       onLoadStop: (web, url) {
         c.progress = 1;
         c._updateHistory();
         c._runPendingSearch();
-        c._syncMaleFilterToWebView();
+        c._syncFemaleFilterToWebView();
       },
     );
   }
